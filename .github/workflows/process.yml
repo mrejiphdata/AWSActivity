@@ -64,7 +64,7 @@ jobs:
           echo "${{ inputs.csv_file }}"
 
           aws s3 cp \
-            "glue_test_data/${{ inputs.csv_file }}" \
+            "CreatingCSV/glue_test_data/${{ inputs.csv_file }}" \
             "s3://$INPUT_BUCKET/input/${{ inputs.csv_file }}"
 
 
