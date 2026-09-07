@@ -1,0 +1,202 @@
+name: Cleanup Legacy Resources
+
+# One-time workflow: removes the AWS resources created by the OLD
+# imperative-CLI deploy.yml (before the CloudFormation migration), so a
+# fresh `aws cloudformation deploy` can create them under stack
+# management instead of hitting "already exists" errors.
+#
+# Safe to run more than once - every step tolerates the resource already
+# being gone. Also clears a CloudFormation stack stuck in
+# REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE from a previously failed deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type CLEANUP to remove legacy (pre-CloudFormation) resources'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ap-southeast-2
+  STACK_NAME: github-aws-activity
+
+  INPUT_BUCKET: github-aws-activity-input
+  OUTPUT_BUCKET: github-aws-activity-output
+
+  GLUE_DATABASE: github_aws_activity_db
+  GLUE_CRAWLER: github-aws-activity-crawler
+  GLUE_JOB: github-aws-activity-etl
+  GLUE_WORKFLOW: github-aws-activity-workflow
+
+  LAMBDA_FUNCTION: github-aws-activity-lambda
+
+  LAMBDA_ROLE: github-aws-activity-lambda-role
+  GLUE_ROLE: github-aws-activity-glue-role
+
+  LAMBDA_POLICY: github-aws-activity-lambda-policy
+  GLUE_POLICY: github-aws-activity-glue-policy
+
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ========================================
+      # 1. Guard against accidental runs
+      # ========================================
+
+      - name: Verify confirmation input
+        run: |
+          if [ "${{ inputs.confirm }}" != "CLEANUP" ]; then
+            echo "Confirmation text did not match 'CLEANUP'. Aborting."
+            exit 1
+          fi
+
+
+      # ========================================
+      # 2. Configure AWS credentials
+      # ========================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ========================================
+      # 3. Get AWS account ID
+      # ========================================
+
+      - name: Get AWS account ID
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> "$GITHUB_ENV"
+
+
+      # ========================================
+      # 4. Delete any stuck CloudFormation stack
+      # ========================================
+      # A failed first-time deploy can leave the stack in
+      # REVIEW_IN_PROGRESS or ROLLBACK_COMPLETE, which blocks future
+      # deploys until it's removed.
+
+      - name: Delete stuck CloudFormation stack if present
+        run: |
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+            echo "Stack exists - deleting it..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" || true
+          else
+            echo "No CloudFormation stack found - nothing to delete."
+          fi
+
+
+      # ========================================
+      # 5. Delete Lambda function + its resource policy
+      # ========================================
+
+      - name: Delete Lambda function
+        run: |
+          aws lambda delete-function \
+            --function-name "$LAMBDA_FUNCTION" \
+            2>/dev/null && echo "Lambda function deleted." \
+            || echo "Lambda function already gone."
+
+
+      # ========================================
+      # 6. Delete Glue triggers, job, crawler, workflow, database
+      # ========================================
+
+      - name: Delete Glue resources
+        run: |
+          aws glue delete-trigger --name github-aws-activity-crawler-success \
+            2>/dev/null && echo "Deleted crawler-success trigger." \
+            || echo "crawler-success trigger already gone."
+
+          aws glue delete-trigger --name github-aws-activity-start \
+            2>/dev/null && echo "Deleted start trigger." \
+            || echo "start trigger already gone."
+
+          aws glue delete-job --job-name "$GLUE_JOB" \
+            2>/dev/null && echo "Deleted Glue job." \
+            || echo "Glue job already gone."
+
+          aws glue delete-crawler --name "$GLUE_CRAWLER" \
+            2>/dev/null && echo "Deleted Glue crawler." \
+            || echo "Glue crawler already gone."
+
+          aws glue delete-workflow --name "$GLUE_WORKFLOW" \
+            2>/dev/null && echo "Deleted Glue workflow." \
+            || echo "Glue workflow already gone."
+
+          aws glue delete-database --name "$GLUE_DATABASE" \
+            2>/dev/null && echo "Deleted Glue database." \
+            || echo "Glue database already gone."
+
+
+      # ========================================
+      # 7. Detach and delete IAM roles + policies
+      # ========================================
+
+      - name: Delete IAM roles and policies
+        run: |
+          aws iam detach-role-policy \
+            --role-name "$LAMBDA_ROLE" \
+            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY" \
+            2>/dev/null || echo "Lambda policy already detached (or role/policy gone)."
+
+          aws iam detach-role-policy \
+            --role-name "$GLUE_ROLE" \
+            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
+            2>/dev/null || echo "Glue policy already detached (or role/policy gone)."
+
+          aws iam delete-role --role-name "$LAMBDA_ROLE" \
+            2>/dev/null && echo "Deleted Lambda role." \
+            || echo "Lambda role already gone."
+
+          aws iam delete-role --role-name "$GLUE_ROLE" \
+            2>/dev/null && echo "Deleted Glue role." \
+            || echo "Glue role already gone."
+
+          aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY" \
+            2>/dev/null && echo "Deleted Lambda policy." \
+            || echo "Lambda policy already gone."
+
+          aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
+            2>/dev/null && echo "Deleted Glue policy." \
+            || echo "Glue policy already gone."
+
+
+      # ========================================
+      # 8. Empty and delete S3 buckets
+      # ========================================
+
+      - name: Empty and delete S3 buckets
+        run: |
+          aws s3 rm "s3://$INPUT_BUCKET" --recursive 2>/dev/null || true
+          aws s3 rb "s3://$INPUT_BUCKET" \
+            2>/dev/null && echo "Deleted input bucket." \
+            || echo "Input bucket already gone."
+
+          aws s3 rm "s3://$OUTPUT_BUCKET" --recursive 2>/dev/null || true
+          aws s3 rb "s3://$OUTPUT_BUCKET" \
+            2>/dev/null && echo "Deleted output bucket." \
+            || echo "Output bucket already gone."
+
+
+      # ========================================
+      # 9. Done
+      # ========================================
+
+      - name: Cleanup complete
+        run: |
+          echo ""
+          echo "========================================"
+          echo "LEGACY CLEANUP COMPLETE"
+          echo "========================================"
+          echo "You can now run deploy.yml to create everything fresh under CloudFormation."
