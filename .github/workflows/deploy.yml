@@ -25,6 +25,7 @@ env:
 
 
 jobs:
+
   deploy:
     runs-on: ubuntu-latest
 
@@ -51,7 +52,7 @@ jobs:
 
 
       # ========================================
-      # 3. Verify AWS identity
+      # 3. Verify AWS account
       # ========================================
 
       - name: Verify AWS identity
@@ -64,6 +65,7 @@ jobs:
       # ========================================
 
       - name: Get AWS account ID
+        id: account
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity \
             --query Account \
@@ -75,7 +77,7 @@ jobs:
 
 
       # ========================================
-      # 5. Create Lambda trust policy
+      # 5. Create Lambda trust policy file
       # ========================================
 
       - name: Create Lambda trust policy
@@ -97,7 +99,7 @@ jobs:
 
 
       # ========================================
-      # 6. Create Glue trust policy
+      # 6. Create Glue trust policy file
       # ========================================
 
       - name: Create Glue trust policy
@@ -119,7 +121,7 @@ jobs:
 
 
       # ========================================
-      # 7. Create Lambda IAM policy if missing
+      # 7. Create Lambda policy if missing
       # ========================================
 
       - name: Create Lambda IAM policy if missing
@@ -129,32 +131,29 @@ jobs:
             --query "Policies[?PolicyName=='$LAMBDA_POLICY'].Arn" \
             --output text)
 
-          if [ -n "$EXISTING_POLICY_ARN" ] && [ "$EXISTING_POLICY_ARN" != "None" ]; then
+          if [ -n "$EXISTING_POLICY_ARN" ] && [ "$EXISTING_POLICY_ARN" != "None" ]
+          then
             echo "Lambda policy already exists."
             echo "Policy ARN: $EXISTING_POLICY_ARN"
           else
             echo "Creating Lambda policy..."
-
             aws iam create-policy \
               --policy-name "$LAMBDA_POLICY" \
               --policy-document file://policies/lambda-policy.json
           fi
 
-
       # ========================================
-      # 8. Create Glue IAM policy if missing
+      # 8. Create Glue policy if missing
       # ========================================
 
       - name: Create Glue IAM policy if missing
         run: |
-          EXISTING_POLICY_ARN=$(aws iam list-policies \
-            --scope Local \
-            --query "Policies[?PolicyName=='$GLUE_POLICY'].Arn" \
-            --output text)
 
-          if [ -n "$EXISTING_POLICY_ARN" ] && [ "$EXISTING_POLICY_ARN" != "None" ]; then
+          if aws iam get-policy \
+            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
+            >/dev/null 2>&1
+          then
             echo "Glue policy already exists."
-            echo "Policy ARN: $EXISTING_POLICY_ARN"
           else
             echo "Creating Glue policy..."
 
@@ -165,48 +164,45 @@ jobs:
 
 
       # ========================================
-      # 9. Create Lambda IAM role if missing
+      # 9. Create Lambda role if missing
       # ========================================
 
-      - name: Create Lambda IAM role if missing
+      - name: Create Lambda IAM policy if missing
         run: |
-          if aws iam get-role \
-            --role-name "$LAMBDA_ROLE" \
-            >/dev/null 2>&1; then
 
-            echo "Lambda role already exists."
-
+          if aws iam list-policies \
+            --scope Local \
+            --query "Policies[?PolicyName=='$LAMBDA_POLICY'].Arn" \
+            --output text | grep -q "$LAMBDA_POLICY"
+          then
+            echo "Lambda policy already exists."
           else
+            echo "Creating Lambda policy..."
 
-            echo "Creating Lambda role..."
-
-            aws iam create-role \
-              --role-name "$LAMBDA_ROLE" \
-              --assume-role-policy-document file://lambda-trust-policy.json
-
+            aws iam create-policy \
+              --policy-name "$LAMBDA_POLICY" \
+              --policy-document file://policies/lambda-policy.json
           fi
 
-
       # ========================================
-      # 10. Create Glue IAM role if missing
+      # 10. Create Glue role if missing
       # ========================================
 
-      - name: Create Glue IAM role if missing
+      - name: Create Glue IAM policy if missing
         run: |
-          if aws iam get-role \
-            --role-name "$GLUE_ROLE" \
-            >/dev/null 2>&1; then
 
-            echo "Glue role already exists."
-
+          if aws iam list-policies \
+            --scope Local \
+            --query "Policies[?PolicyName=='$GLUE_POLICY'].Arn" \
+            --output text | grep -q "$GLUE_POLICY"
+          then
+            echo "Glue policy already exists."
           else
+            echo "Creating Glue policy..."
 
-            echo "Creating Glue role..."
-
-            aws iam create-role \
-              --role-name "$GLUE_ROLE" \
-              --assume-role-policy-document file://glue-trust-policy.json
-
+            aws iam create-policy \
+              --policy-name "$GLUE_POLICY" \
+              --policy-document file://policies/glue-policy.json
           fi
 
 
@@ -216,6 +212,7 @@ jobs:
 
       - name: Attach Lambda policy
         run: |
+
           aws iam attach-role-policy \
             --role-name "$LAMBDA_ROLE" \
             --policy-arn \
@@ -230,6 +227,7 @@ jobs:
 
       - name: Attach Glue policy
         run: |
+
           aws iam attach-role-policy \
             --role-name "$GLUE_ROLE" \
             --policy-arn \
@@ -239,19 +237,18 @@ jobs:
 
 
       # ========================================
-      # 13. Create input S3 bucket if missing
+      # 13. Create input bucket if missing
       # ========================================
 
       - name: Create input S3 bucket if missing
         run: |
+
           if aws s3api head-bucket \
             --bucket "$INPUT_BUCKET" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Input bucket already exists."
-
           else
-
             echo "Creating input bucket..."
 
             aws s3api create-bucket \
@@ -259,24 +256,22 @@ jobs:
               --region "$AWS_REGION" \
               --create-bucket-configuration \
               LocationConstraint="$AWS_REGION"
-
           fi
 
 
       # ========================================
-      # 14. Create output S3 bucket if missing
+      # 14. Create output bucket if missing
       # ========================================
 
       - name: Create output S3 bucket if missing
         run: |
+
           if aws s3api head-bucket \
             --bucket "$OUTPUT_BUCKET" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Output bucket already exists."
-
           else
-
             echo "Creating output bucket..."
 
             aws s3api create-bucket \
@@ -284,16 +279,16 @@ jobs:
               --region "$AWS_REGION" \
               --create-bucket-configuration \
               LocationConstraint="$AWS_REGION"
-
           fi
 
 
       # ========================================
-      # 15. Configure S3 public access blocking
+      # 15. Block public access
       # ========================================
 
       - name: Configure S3 public access blocking
         run: |
+
           aws s3api put-public-access-block \
             --bucket "$INPUT_BUCKET" \
             --public-access-block-configuration \
@@ -313,20 +308,18 @@ jobs:
 
       - name: Create Glue database if missing
         run: |
+
           if aws glue get-database \
             --name "$GLUE_DATABASE" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Glue database already exists."
-
           else
-
             echo "Creating Glue database..."
 
             aws glue create-database \
               --database-input \
               "{\"Name\":\"$GLUE_DATABASE\",\"Description\":\"AWS Activity Glue database\"}"
-
           fi
 
 
@@ -336,6 +329,7 @@ jobs:
 
       - name: Upload Glue ETL script
         run: |
+
           aws s3 cp \
             glue/ETLtrialJob.py \
             "s3://$INPUT_BUCKET/scripts/ETLtrialJob.py"
@@ -349,14 +343,13 @@ jobs:
 
       - name: Create Glue crawler if missing
         run: |
+
           if aws glue get-crawler \
             --name "$GLUE_CRAWLER" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Glue crawler already exists."
-
           else
-
             echo "Creating Glue crawler..."
 
             aws glue create-crawler \
@@ -367,7 +360,6 @@ jobs:
               "{\"S3Targets\":[{\"Path\":\"s3://$INPUT_BUCKET/input/\"}]}" \
               --schema-change-policy \
               "{\"UpdateBehavior\":\"UPDATE_IN_DATABASE\",\"DeleteBehavior\":\"LOG\"}"
-
           fi
 
 
@@ -377,14 +369,13 @@ jobs:
 
       - name: Create Glue ETL job if missing
         run: |
+
           if aws glue get-job \
             --name "$GLUE_JOB" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Glue ETL job already exists."
-
           else
-
             echo "Creating Glue ETL job..."
 
             aws glue create-job \
@@ -396,7 +387,6 @@ jobs:
               --max-retries 0 \
               --default-arguments \
               '{"--library-set":"analytics"}'
-
           fi
 
 
@@ -406,38 +396,35 @@ jobs:
 
       - name: Create Glue workflow if missing
         run: |
+
           if aws glue get-workflow \
             --name "$GLUE_WORKFLOW" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Glue workflow already exists."
-
           else
-
             echo "Creating Glue workflow..."
 
             aws glue create-workflow \
               --name "$GLUE_WORKFLOW" \
               --description "AWS Activity serverless ETL workflow" \
               --max-concurrent-runs 1
-
           fi
 
 
       # ========================================
-      # 21. Create workflow start trigger if missing
+      # 21. Create ON_DEMAND start trigger if missing
       # ========================================
 
       - name: Create workflow start trigger if missing
         run: |
+
           if aws glue get-trigger \
             --name github-aws-activity-start \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Workflow start trigger already exists."
-
           else
-
             echo "Creating workflow start trigger..."
 
             aws glue create-trigger \
@@ -446,24 +433,22 @@ jobs:
               --type ON_DEMAND \
               --actions \
               "[{\"CrawlerName\":\"$GLUE_CRAWLER\"}]"
-
           fi
 
 
       # ========================================
-      # 22. Create crawler success trigger if missing
+      # 22. Create crawler success trigger
       # ========================================
 
       - name: Create crawler success trigger if missing
         run: |
+
           if aws glue get-trigger \
             --name github-aws-activity-crawler-success \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Crawler success trigger already exists."
-
           else
-
             echo "Creating crawler success trigger..."
 
             aws glue create-trigger \
@@ -474,7 +459,6 @@ jobs:
               "{\"Logical\":\"AND\",\"Conditions\":[{\"LogicalOperator\":\"EQUALS\",\"CrawlerName\":\"$GLUE_CRAWLER\",\"CrawlState\":\"SUCCEEDED\"}]}" \
               --actions \
               "[{\"JobName\":\"$GLUE_JOB\"}]"
-
           fi
 
 
@@ -484,6 +468,7 @@ jobs:
 
       - name: Package Lambda
         run: |
+
           cd lambda
 
           zip -q ../lambda.zip lambda_function.py
@@ -494,16 +479,18 @@ jobs:
 
 
       # ========================================
-      # 24. Create or update Lambda function
+      # 24. Create Lambda if missing
       # ========================================
 
       - name: Create Lambda function if missing
         run: |
+
           if aws lambda get-function \
             --function-name "$LAMBDA_FUNCTION" \
-            >/dev/null 2>&1; then
-
+            >/dev/null 2>&1
+          then
             echo "Lambda function already exists."
+
             echo "Updating Lambda code..."
 
             aws lambda update-function-code \
@@ -511,7 +498,6 @@ jobs:
               --zip-file fileb://lambda.zip
 
           else
-
             echo "Creating Lambda function..."
 
             aws lambda create-function \
@@ -522,7 +508,6 @@ jobs:
               --zip-file fileb://lambda.zip \
               --timeout 30 \
               --memory-size 128
-
           fi
 
 
@@ -532,6 +517,7 @@ jobs:
 
       - name: Configure Lambda S3 permission
         run: |
+
           aws lambda add-permission \
             --function-name "$LAMBDA_FUNCTION" \
             --statement-id s3-invoke-permission \
@@ -543,11 +529,12 @@ jobs:
 
 
       # ========================================
-      # 26. Configure S3 to Lambda notification
+      # 26. Configure S3 → Lambda notification
       # ========================================
 
       - name: Configure S3 Lambda notification
         run: |
+
           LAMBDA_ARN=$(aws lambda get-function \
             --function-name "$LAMBDA_FUNCTION" \
             --query 'Configuration.FunctionArn' \
@@ -589,7 +576,7 @@ jobs:
 
 
       # ========================================
-      # 27. Verify deployment
+      # 27. Verify everything
       # ========================================
 
       - name: Verify deployment
@@ -663,7 +650,6 @@ jobs:
           echo "========================================"
           echo "DEPLOYMENT COMPLETE"
           echo "========================================"
-
           echo ""
           echo "No CSV files were uploaded."
           echo "Use process.yml to process one CSV at a time."
