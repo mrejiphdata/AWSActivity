@@ -1,4 +1,4 @@
-name: Deploy AWS Activity
+name: Deploy AWS Activity with CloudFormation
 
 on:
   workflow_dispatch:
@@ -7,14 +7,8 @@ env:
   AWS_REGION: ap-southeast-2
   STACK_NAME: github-aws-activity
 
-  INPUT_BUCKET: github-aws-activity-input
-  GLUE_JOB_SCRIPT: glue/ETLtrialJob.py
-
-  GLUE_WORKFLOW: github-aws-activity-workflow
-  GLUE_CRAWLER_SUCCESS_TRIGGER: github-aws-activity-crawler-success
-
-
 jobs:
+
   deploy:
     runs-on: ubuntu-latest
 
@@ -41,7 +35,7 @@ jobs:
 
 
       # ========================================
-      # 3. Verify AWS identity
+      # 3. Verify AWS account
       # ========================================
 
       - name: Verify AWS identity
@@ -50,157 +44,120 @@ jobs:
 
 
       # ========================================
-      # 4. Deploy CloudFormation stack
+      # 4. Validate CloudFormation template
       # ========================================
-      # Creates/updates everything: IAM roles+policies, both S3 buckets,
-      # the Lambda function (inline code - no zip/upload needed), the S3
-      # -> Lambda notification, and the full Glue database / crawler /
-      # job / workflow / triggers. CAPABILITY_NAMED_IAM is required
-      # because the template creates IAM roles and policies with
-      # explicit names.
-      #
-      # NOTE: this uses the low-level create-change-set / execute-change-set
-      # calls instead of `aws cloudformation deploy`. That convenience
-      # wrapper has a known bug where it crashes with a bare
-      # "aws: [ERROR]: 'Status'" instead of a real error message while
-      # polling change-set status - even when the change set itself
-      # succeeded. The explicit waiters below don't share that bug, and
-      # print the real failure reason from describe-stack-events instead.
 
-      - name: Deploy CloudFormation stack
+      - name: Validate CloudFormation template
         run: |
-          # A previous failed attempt can leave the stack stuck in a
-          # non-usable state - REVIEW_IN_PROGRESS (change set never
-          # created), ROLLBACK_COMPLETE / ROLLBACK_FAILED (create failed
-          # and rolled back), or CREATE_FAILED. None of these can be
-          # updated directly - only deleted. Clear it so this run isn't
-          # blocked by a previous failure.
-          STACK_STATUS=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "MISSING")
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/template.yaml
 
-          case "$STACK_STATUS" in
-            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED)
-              echo "Stack stuck in $STACK_STATUS from a previous failed deploy - deleting it first."
-              aws cloudformation delete-stack --stack-name "$STACK_NAME"
-              aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-              STACK_STATUS="MISSING"
-              ;;
-          esac
-
-          if [ "$STACK_STATUS" = "MISSING" ]; then
-            CHANGESET_TYPE="CREATE"
-          else
-            CHANGESET_TYPE="UPDATE"
-          fi
-
-          CHANGESET_NAME="deploy-$(date +%s)"
-
-          echo "Creating $CHANGESET_TYPE change set: $CHANGESET_NAME"
-
-          aws cloudformation create-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGESET_NAME" \
-            --change-set-type "$CHANGESET_TYPE" \
-            --template-body file://cloudformation/template.yaml \
-            --capabilities CAPABILITY_NAMED_IAM
-
-          echo "Waiting for change set to finish creating..."
-
-          if ! aws cloudformation wait change-set-create-complete \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGESET_NAME"; then
-
-            REASON=$(aws cloudformation describe-change-set \
-              --stack-name "$STACK_NAME" \
-              --change-set-name "$CHANGESET_NAME" \
-              --query 'StatusReason' --output text)
-
-            if [[ "$REASON" == *"didn't contain changes"* ]]; then
-              echo "No changes to deploy - nothing to do."
-              aws cloudformation delete-change-set \
-                --stack-name "$STACK_NAME" \
-                --change-set-name "$CHANGESET_NAME"
-              exit 0
-            fi
-
-            echo "Change set failed to create: $REASON"
-            exit 1
-          fi
-
-          echo "Executing change set..."
-
-          aws cloudformation execute-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CHANGESET_NAME"
-
-          echo "Waiting for stack $CHANGESET_TYPE to complete..."
-
-          WAITER="stack-create-complete"
-          if [ "$CHANGESET_TYPE" = "UPDATE" ]; then
-            WAITER="stack-update-complete"
-          fi
-
-          if ! aws cloudformation wait "$WAITER" --stack-name "$STACK_NAME"; then
-            echo "Stack $CHANGESET_TYPE did not complete successfully. Failure events:"
-            aws cloudformation describe-stack-events \
-              --stack-name "$STACK_NAME" \
-              --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId,ResourceStatusReason]" \
-              --output table
-            exit 1
-          fi
-
-          echo "Stack deploy complete."
+          echo "CloudFormation template is valid."
 
 
       # ========================================
       # 5. Upload Glue ETL script
       # ========================================
-      # Must happen AFTER the stack deploy, since the input bucket is
-      # created by that same stack. Glue does not validate that the
-      # script exists at job-creation time (only when the job actually
-      # runs), so this ordering is safe even on the very first deploy.
+      # The input bucket is created by CloudFormation.
+      # We therefore deploy the stack first, then upload
+      # the Glue script.
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "$STACK_NAME" \
+            --template-file cloudformation/template.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+          echo "CloudFormation stack deployment complete."
+
+
+      # ========================================
+      # 6. Upload Glue ETL script
+      # ========================================
 
       - name: Upload Glue ETL script
         run: |
+          INPUT_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
+            --output text)
+
+          echo "Input bucket: $INPUT_BUCKET"
+
           aws s3 cp \
-            "$GLUE_JOB_SCRIPT" \
+            glue/ETLtrialJob.py \
             "s3://$INPUT_BUCKET/scripts/ETLtrialJob.py"
 
           echo "Glue ETL script uploaded."
 
 
       # ========================================
-      # 6. Verify deployment
+      # 7. Verify CloudFormation resources
       # ========================================
 
       - name: Verify deployment
         run: |
 
-          echo ""
           echo "========================================"
-          echo "DEPLOYMENT VERIFICATION"
+          echo "AWS ACTIVITY DEPLOYMENT"
           echo "========================================"
 
           echo ""
-          echo "STACK STATUS:"
+          echo "STACK:"
           aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --query 'Stacks[0].StackStatus' \
+            --query "Stacks[0].StackStatus" \
             --output text
 
           echo ""
-          echo "STACK OUTPUTS:"
+          echo "INPUT BUCKET:"
           aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --query 'Stacks[0].Outputs' \
-            --output table
+            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
+            --output text
 
           echo ""
-          echo "CRAWLER SUCCESS TRIGGER STATE (must be ACTIVATED, not CREATED):"
-          aws glue get-trigger \
-            --name "$GLUE_CRAWLER_SUCCESS_TRIGGER" \
-            --query 'Trigger.State' \
+          echo "OUTPUT BUCKET:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='OutputBucketName'].OutputValue" \
+            --output text
+
+          echo ""
+          echo "GLUE DATABASE:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='GlueDatabaseName'].OutputValue" \
+            --output text
+
+          echo ""
+          echo "GLUE CRAWLER:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='GlueCrawlerName'].OutputValue" \
+            --output text
+
+          echo ""
+          echo "GLUE JOB:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='GlueJobName'].OutputValue" \
+            --output text
+
+          echo ""
+          echo "GLUE WORKFLOW:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='GlueWorkflowName'].OutputValue" \
+            --output text
+
+          echo ""
+          echo "LAMBDA:"
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
             --output text
 
           echo ""
@@ -209,5 +166,5 @@ jobs:
           echo "========================================"
 
           echo ""
-          echo "No CSV files were uploaded."
-          echo "Use process.yml to process one CSV at a time."
+          echo "No CSV files were uploaded by this deployment."
+          echo "Upload/process one CSV at a time using process.yml."

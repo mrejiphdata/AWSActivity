@@ -1,349 +1,296 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  GitHub AWS Activity pipeline - S3 upload triggers Lambda, which starts a
-  Glue Workflow (crawler -> conditional trigger -> Python Shell ETL job).
-  Replaces the imperative aws-cli steps previously in deploy.yml.
+AWSTemplateFormatVersion: "2010-09-09"
 
-Parameters:
-  InputBucketName:
-    Type: String
-    Default: github-aws-activity-input
-  OutputBucketName:
-    Type: String
-    Default: github-aws-activity-output
-  GlueDatabaseName:
-    Type: String
-    Default: github_aws_activity_db
-  GlueCrawlerName:
-    Type: String
-    Default: github-aws-activity-crawler
-  GlueJobName:
-    Type: String
-    Default: github-aws-activity-etl
-  GlueWorkflowName:
-    Type: String
-    Default: github-aws-activity-workflow
-  LambdaFunctionName:
-    Type: String
-    Default: github-aws-activity-lambda
-  LambdaRoleName:
-    Type: String
-    Default: github-aws-activity-lambda-role
-  GlueRoleName:
-    Type: String
-    Default: github-aws-activity-glue-role
-  LambdaPolicyName:
-    Type: String
-    Default: github-aws-activity-lambda-policy
-  GluePolicyName:
-    Type: String
-    Default: github-aws-activity-glue-policy
+Description: >
+  AWS Activity serverless ETL infrastructure.
+  Creates S3 buckets, IAM roles, Glue database,
+  crawler, Python Shell ETL job, Glue workflow,
+  triggers, Lambda function and S3 event notification.
 
 Resources:
 
-  # ========================================
-  # IAM - Lambda
-  # ========================================
-
-  LambdaExecutionPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: !Ref LambdaPolicyName
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: StartGlueWorkflow
-            Effect: Allow
-            Action:
-              - glue:StartWorkflowRun
-            Resource: "*"
-          - Sid: LambdaCloudWatchLogs
-            Effect: Allow
-            Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Ref LambdaRoleName
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - !Ref LambdaExecutionPolicy
-
-  # ========================================
-  # IAM - Glue
-  # ========================================
-
-  GlueExecutionPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: !Ref GluePolicyName
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: ReadInputBucket
-            Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:GetObjectVersion
-              - s3:ListBucket
-              - s3:GetBucketLocation
-            Resource:
-              - !Sub "arn:aws:s3:::${InputBucketName}"
-              - !Sub "arn:aws:s3:::${InputBucketName}/*"
-          - Sid: WriteOutputBucket
-            Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:GetObjectVersion
-              - s3:PutObject
-              - s3:DeleteObject
-              - s3:ListBucket
-              - s3:GetBucketLocation
-            Resource:
-              - !Sub "arn:aws:s3:::${OutputBucketName}"
-              - !Sub "arn:aws:s3:::${OutputBucketName}/*"
-          - Sid: GlueDataCatalog
-            Effect: Allow
-            Action:
-              - glue:GetDatabase
-              - glue:GetDatabases
-              - glue:GetTable
-              - glue:GetTables
-              - glue:GetPartition
-              - glue:GetPartitions
-              - glue:CreateTable
-              - glue:UpdateTable
-              - glue:CreatePartition
-              - glue:BatchCreatePartition
-              - glue:UpdatePartition
-            Resource: "*"
-          - Sid: GlueWorkflowProperties
-            Effect: Allow
-            Action:
-              - glue:GetWorkflowRunProperties
-            Resource: "*"
-          - Sid: GlueLogs
-            Effect: Allow
-            Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
-          - Sid: GlueMetrics
-            Effect: Allow
-            Action:
-              - cloudwatch:PutMetricData
-            Resource: "*"
-
-  GlueExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Ref GlueRoleName
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: glue.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - !Ref GlueExecutionPolicy
-
-  # ========================================
-  # Lambda function (inline code - small,
-  # boto3-only, so no S3 zip upload needed)
-  # ========================================
-
-  LambdaFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Ref LambdaFunctionName
-      Runtime: python3.14
-      Handler: lambda_function.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 30
-      MemorySize: 128
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import urllib.parse
-
-          glue_client = boto3.client("glue")
-
-          WORKFLOW_NAME = "github-aws-activity-workflow"
-
-
-          def lambda_handler(event, context):
-
-              record = event["Records"][0]
-
-              bucket = record["s3"]["bucket"]["name"]
-
-              key = urllib.parse.unquote_plus(
-                  record["s3"]["object"]["key"]
-              )
-
-              print("Bucket:", bucket)
-              print("File:", key)
-
-              if not key.lower().endswith(".csv"):
-                  return {
-                      "statusCode": 200,
-                      "body": json.dumps("Not a CSV file")
-                  }
-
-              response = glue_client.start_workflow_run(
-                  Name=WORKFLOW_NAME,
-                  RunProperties={
-                      "SOURCE_BUCKET": bucket,
-                      "SOURCE_KEY": key
-                  }
-              )
-
-              print("Workflow started:", response["RunId"])
-
-              return {
-                  "statusCode": 200,
-                  "body": json.dumps({
-                      "message": "Glue Workflow started",
-                      "workflow_run_id": response["RunId"],
-                      "source_bucket": bucket,
-                      "source_key": key
-                  })
-              }
-
-  LambdaInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref LambdaFunction
-      Action: lambda:InvokeFunction
-      Principal: s3.amazonaws.com
-      # Hardcoded (not !GetAtt InputBucket...) on purpose: the bucket name
-      # is fixed via the parameter above, so we can reference its ARN here
-      # without creating a InputBucket -> Permission -> InputBucket cycle.
-      SourceArn: !Sub "arn:aws:s3:::${InputBucketName}"
-      SourceAccount: !Ref AWS::AccountId
-
-  # ========================================
-  # S3 buckets
-  # ========================================
+  # ============================================================
+  # 1. INPUT S3 BUCKET
+  # ============================================================
 
   InputBucket:
     Type: AWS::S3::Bucket
-    # Forces the permission to exist before S3 tries to validate/apply the
-    # Lambda notification config against it (S3 checks the Lambda resource
-    # policy at PutBucketNotificationConfiguration time).
-    DependsOn: LambdaInvokePermission
     Properties:
-      BucketName: !Ref InputBucketName
+      BucketName: github-aws-activity-input
+
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
+
       NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt LambdaFunction.Arn
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: input/
-                  - Name: suffix
-                    Value: .csv
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+
+  # ============================================================
+  # 2. OUTPUT S3 BUCKET
+  # ============================================================
 
   OutputBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Ref OutputBucketName
+      BucketName: github-aws-activity-output
+
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
 
-  # ========================================
-  # Glue Data Catalog
-  # ========================================
+
+  # ============================================================
+  # 3. LAMBDA EXECUTION ROLE
+  # ============================================================
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-aws-activity-lambda-role
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+
+        - PolicyName: LambdaExecutionPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+
+            Statement:
+
+              # Lambda CloudWatch Logs
+              - Sid: LambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              # Read CSV from input bucket
+              - Sid: ReadInputBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt InputBucket.Arn
+                  - !Sub "${InputBucket.Arn}/*"
+
+              # Start Glue workflow
+              - Sid: StartGlueWorkflow
+                Effect: Allow
+                Action:
+                  - glue:StartWorkflowRun
+                  - glue:GetWorkflow
+                  - glue:GetWorkflowRun
+                  - glue:GetWorkflowRunProperties
+                Resource: "*"
+
+
+  # ============================================================
+  # 4. GLUE EXECUTION ROLE
+  # ============================================================
+
+  GlueExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-aws-activity-glue-role
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+
+        - PolicyName: GlueExecutionPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+
+            Statement:
+
+              # Read input bucket
+              - Sid: ReadInputBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt InputBucket.Arn
+                  - !Sub "${InputBucket.Arn}/*"
+
+              # Write output bucket
+              - Sid: WriteOutputBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt OutputBucket.Arn
+                  - !Sub "${OutputBucket.Arn}/*"
+
+              # Glue Data Catalog
+              - Sid: GlueDataCatalog
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                Resource: "*"
+
+              # Workflow properties
+              - Sid: GlueWorkflowProperties
+                Effect: Allow
+                Action:
+                  - glue:GetWorkflowRunProperties
+                Resource: "*"
+
+              # Glue CloudWatch logs
+              - Sid: GlueLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              # Glue metrics
+              - Sid: GlueMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+
+  # ============================================================
+  # 5. GLUE DATABASE
+  # ============================================================
 
   GlueDatabase:
     Type: AWS::Glue::Database
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
-        Name: !Ref GlueDatabaseName
+        Name: github_aws_activity_db
         Description: AWS Activity Glue database
+
+
+  # ============================================================
+  # 6. GLUE CRAWLER
+  # ============================================================
 
   GlueCrawler:
     Type: AWS::Glue::Crawler
-    DependsOn: GlueDatabase
+    DependsOn:
+      - GlueExecutionRole
+      - GlueDatabase
+
     Properties:
-      Name: !Ref GlueCrawlerName
+      Name: github-aws-activity-crawler
+
       Role: !GetAtt GlueExecutionRole.Arn
-      DatabaseName: !Ref GlueDatabaseName
+
+      DatabaseName: !Ref GlueDatabase
+
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${InputBucketName}/input/"
+          - Path: !Sub "s3://${InputBucket}/input/"
+
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: LOG
 
-  # ========================================
-  # Glue ETL job
-  # ========================================
-  # NOTE: ScriptLocation points at an object the workflow uploads AFTER
-  # this stack deploys (see deploy.yml). Glue does not validate that the
-  # script exists at job-creation time, only when the job actually runs,
-  # so this ordering is safe.
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_EVERYTHING
+
+
+  # ============================================================
+  # 7. GLUE PYTHON SHELL JOB
+  # ============================================================
 
   GlueETLJob:
     Type: AWS::Glue::Job
+    DependsOn:
+      - GlueExecutionRole
+      - InputBucket
+
     Properties:
-      Name: !Ref GlueJobName
+      Name: github-aws-activity-etl
+
       Role: !GetAtt GlueExecutionRole.Arn
+
       Command:
         Name: pythonshell
-        PythonVersion: '3.9'
-        ScriptLocation: !Sub "s3://${InputBucketName}/scripts/ETLtrialJob.py"
+        PythonVersion: "3.9"
+        ScriptLocation: !Sub "s3://${InputBucket}/scripts/ETLtrialJob.py"
+
       MaxCapacity: 0.0625
+
       MaxRetries: 0
+
       DefaultArguments:
         "--library-set": analytics
 
-  # ========================================
-  # Glue Workflow + triggers
-  # ========================================
+
+  # ============================================================
+  # 8. GLUE WORKFLOW
+  # ============================================================
 
   GlueWorkflow:
     Type: AWS::Glue::Workflow
     Properties:
-      Name: !Ref GlueWorkflowName
+      Name: github-aws-activity-workflow
       Description: AWS Activity serverless ETL workflow
       MaxConcurrentRuns: 1
 
-  GlueStartTrigger:
+
+  # ============================================================
+  # 9. WORKFLOW START TRIGGER
+  # ============================================================
+
+  GlueWorkflowStartTrigger:
     Type: AWS::Glue::Trigger
     DependsOn:
       - GlueWorkflow
       - GlueCrawler
+
     Properties:
       Name: github-aws-activity-start
-      WorkflowName: !Ref GlueWorkflowName
+
+      WorkflowName: !Ref GlueWorkflow
+
       Type: ON_DEMAND
+
       Actions:
-        - CrawlerName: !Ref GlueCrawlerName
+        - CrawlerName: !Ref GlueCrawler
+
+
+  # ============================================================
+  # 10. CRAWLER SUCCESS TRIGGER
+  # ============================================================
 
   GlueCrawlerSuccessTrigger:
     Type: AWS::Glue::Trigger
@@ -351,36 +298,214 @@ Resources:
       - GlueWorkflow
       - GlueCrawler
       - GlueETLJob
+
     Properties:
       Name: github-aws-activity-crawler-success
-      WorkflowName: !Ref GlueWorkflowName
+
+      WorkflowName: !Ref GlueWorkflow
+
       Type: CONDITIONAL
-      # This is the exact bug that broke the old imperative deploy: a
-      # CONDITIONAL trigger created without being activated sits in
-      # CREATED state and never fires. StartOnCreation fixes it natively.
+
       StartOnCreation: true
+
       Predicate:
         Logical: AND
+
         Conditions:
           - LogicalOperator: EQUALS
-            CrawlerName: !Ref GlueCrawlerName
+            CrawlerName: !Ref GlueCrawler
             CrawlState: SUCCEEDED
+
       Actions:
-        - JobName: !Ref GlueJobName
+        - JobName: !Ref GlueETLJob
+
+
+  # ============================================================
+  # 11. LAMBDA FUNCTION
+  # ============================================================
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaExecutionRole
+
+    Properties:
+      FunctionName: github-aws-activity-lambda
+
+      Runtime: python3.14
+
+      Handler: lambda_function.lambda_handler
+
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+      Timeout: 30
+
+      MemorySize: 128
+
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib.parse
+          import os
+
+          glue = boto3.client("glue")
+
+          WORKFLOW_NAME = os.environ.get(
+              "GLUE_WORKFLOW",
+              "github-aws-activity-workflow"
+          )
+
+          def lambda_handler(event, context):
+
+              print("Received S3 event:")
+              print(json.dumps(event))
+
+              for record in event.get("Records", []):
+
+                  bucket = record["s3"]["bucket"]["name"]
+
+                  key = urllib.parse.unquote_plus(
+                      record["s3"]["object"]["key"]
+                  )
+
+                  print(f"Processing file: s3://{bucket}/{key}")
+
+                  response = glue.start_workflow_run(
+                      Name=WORKFLOW_NAME,
+                      RunProperties={
+                          "input_file": key,
+                          "input_bucket": bucket
+                      }
+                  )
+
+                  print(
+                      f"Glue workflow started: "
+                      f"{response['RunId']}"
+                  )
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps(
+                      "Glue workflow started successfully"
+                  )
+              }
+
+      Environment:
+        Variables:
+          GLUE_WORKFLOW: github-aws-activity-workflow
+
+
+  # ============================================================
+  # 12. EVENTBRIDGE PERMISSION FOR LAMBDA
+  # ============================================================
+
+  LambdaEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+
+  # ============================================================
+  # 13. EVENTBRIDGE RULE
+  # ============================================================
+  #
+  # S3 -> EventBridge -> Lambda
+  #
+  # Only CSV files inside input/ are processed.
+  #
+  # ============================================================
+
+  S3CSVEventRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - LambdaEventBridgePermission
+
+    Properties:
+      Name: github-aws-activity-csv-trigger
+
+      Description: >
+        Trigger Lambda whenever a CSV file is uploaded
+        to the input folder.
+
+      State: ENABLED
+
+      EventPattern:
+        source:
+          - aws.s3
+
+        detail-type:
+          - Object Created
+
+        detail:
+          bucket:
+            name:
+              - github-aws-activity-input
+
+          object:
+            key:
+              - prefix: input/
+              - suffix: .csv
+
+      Targets:
+        - Id: LambdaTarget
+          Arn: !GetAtt LambdaFunction.Arn
+
+
+# ================================================================
+# OUTPUTS
+# ================================================================
 
 Outputs:
+
   InputBucketName:
+    Description: Input S3 bucket
     Value: !Ref InputBucket
+
+
   OutputBucketName:
+    Description: Output S3 bucket
     Value: !Ref OutputBucket
-  LambdaFunctionArn:
-    Value: !GetAtt LambdaFunction.Arn
+
+
+  GlueDatabaseName:
+    Description: Glue database
+    Value: !Ref GlueDatabase
+
+
+  GlueCrawlerName:
+    Description: Glue crawler
+    Value: !Ref GlueCrawler
+
+
+  GlueJobName:
+    Description: Glue ETL job
+    Value: !Ref GlueETLJob
+
+
   GlueWorkflowName:
-    Value: !Ref GlueWorkflowName
+    Description: Glue workflow
+    Value: !Ref GlueWorkflow
+
+
+  GlueStartTriggerName:
+    Description: Glue workflow start trigger
+    Value: !Ref GlueWorkflowStartTrigger
+
+
   GlueCrawlerSuccessTriggerName:
-    Description: >-
-      Name only (CFN doesn't expose trigger State as an attribute) - verify
-      its actual state after deploy with: aws glue get-trigger --name
-      <this value> --query 'Trigger.State'. It must read ACTIVATED, not
-      CREATED, or the ETL job will never fire after the crawler succeeds.
+    Description: Glue crawler success trigger
     Value: !Ref GlueCrawlerSuccessTrigger
+
+
+  LambdaFunctionName:
+    Description: Lambda function
+    Value: !Ref LambdaFunction
+
+
+  LambdaFunctionArn:
+    Description: Lambda ARN
+    Value: !GetAtt LambdaFunction.Arn
