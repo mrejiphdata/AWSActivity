@@ -166,41 +166,42 @@ jobs:
       # 9. Create Lambda role if missing
       # ========================================
 
-      - name: Create Lambda IAM role if missing
+      - name: Create Lambda IAM policy if missing
         run: |
 
-          if aws iam get-role \
-            --role-name "$LAMBDA_ROLE" \
-            >/dev/null 2>&1
+          if aws iam list-policies \
+            --scope Local \
+            --query "Policies[?PolicyName=='$LAMBDA_POLICY'].Arn" \
+            --output text | grep -q "$LAMBDA_POLICY"
           then
-            echo "Lambda role already exists."
+            echo "Lambda policy already exists."
           else
-            echo "Creating Lambda role..."
+            echo "Creating Lambda policy..."
 
-            aws iam create-role \
-              --role-name "$LAMBDA_ROLE" \
-              --assume-role-policy-document file://lambda-trust-policy.json
+            aws iam create-policy \
+              --policy-name "$LAMBDA_POLICY" \
+              --policy-document file://policies/lambda-policy.json
           fi
-
 
       # ========================================
       # 10. Create Glue role if missing
       # ========================================
 
-      - name: Create Glue IAM role if missing
+      - name: Create Glue IAM policy if missing
         run: |
 
-          if aws iam get-role \
-            --role-name "$GLUE_ROLE" \
-            >/dev/null 2>&1
+          if aws iam list-policies \
+            --scope Local \
+            --query "Policies[?PolicyName=='$GLUE_POLICY'].Arn" \
+            --output text | grep -q "$GLUE_POLICY"
           then
-            echo "Glue role already exists."
+            echo "Glue policy already exists."
           else
-            echo "Creating Glue role..."
+            echo "Creating Glue policy..."
 
-            aws iam create-role \
-              --role-name "$GLUE_ROLE" \
-              --assume-role-policy-document file://glue-trust-policy.json
+            aws iam create-policy \
+              --policy-name "$GLUE_POLICY" \
+              --policy-document file://policies/glue-policy.json
           fi
 
 

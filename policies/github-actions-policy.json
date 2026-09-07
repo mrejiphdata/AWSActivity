@@ -8,6 +8,7 @@
         "iam:CreateRole",
         "iam:DeleteRole",
         "iam:GetRole",
+        "iam:ListPolicies",
         "iam:CreatePolicy",
         "iam:DeletePolicy",
         "iam:GetPolicy",
