@@ -102,10 +102,27 @@ jobs:
 
       - name: Delete Lambda function
         run: |
-          aws lambda delete-function \
-            --function-name "$LAMBDA_FUNCTION" \
-            2>/dev/null && echo "Lambda function deleted." \
-            || echo "Lambda function already gone."
+          # Treats any failure whose message doesn't clearly mean "it's
+          # already gone" as a real error and stops the job - rather than
+          # silently reporting success (that's what hid the IAM policy
+          # deletion failures last time and let deploy.yml keep hitting
+          # the same "already exists" conflict).
+          try_delete() {
+            local desc="$1"; shift
+            local out
+            if out=$("$@" 2>&1); then
+              echo "Deleted: $desc"
+            elif echo "$out" | grep -qiE "NoSuchEntity|EntityNotFound|ResourceNotFoundException|NotFoundException|does not exist|NoSuchBucket"; then
+              echo "$desc: already gone."
+            else
+              echo "ERROR deleting $desc:"
+              echo "$out"
+              exit 1
+            fi
+          }
+
+          try_delete "Lambda function" \
+            aws lambda delete-function --function-name "$LAMBDA_FUNCTION"
 
 
       # ========================================
@@ -114,29 +131,37 @@ jobs:
 
       - name: Delete Glue resources
         run: |
-          aws glue delete-trigger --name github-aws-activity-crawler-success \
-            2>/dev/null && echo "Deleted crawler-success trigger." \
-            || echo "crawler-success trigger already gone."
+          try_delete() {
+            local desc="$1"; shift
+            local out
+            if out=$("$@" 2>&1); then
+              echo "Deleted: $desc"
+            elif echo "$out" | grep -qiE "NoSuchEntity|EntityNotFound|ResourceNotFoundException|NotFoundException|does not exist|NoSuchBucket"; then
+              echo "$desc: already gone."
+            else
+              echo "ERROR deleting $desc:"
+              echo "$out"
+              exit 1
+            fi
+          }
 
-          aws glue delete-trigger --name github-aws-activity-start \
-            2>/dev/null && echo "Deleted start trigger." \
-            || echo "start trigger already gone."
+          try_delete "crawler-success trigger" \
+            aws glue delete-trigger --name github-aws-activity-crawler-success
 
-          aws glue delete-job --job-name "$GLUE_JOB" \
-            2>/dev/null && echo "Deleted Glue job." \
-            || echo "Glue job already gone."
+          try_delete "start trigger" \
+            aws glue delete-trigger --name github-aws-activity-start
 
-          aws glue delete-crawler --name "$GLUE_CRAWLER" \
-            2>/dev/null && echo "Deleted Glue crawler." \
-            || echo "Glue crawler already gone."
+          try_delete "Glue job" \
+            aws glue delete-job --job-name "$GLUE_JOB"
 
-          aws glue delete-workflow --name "$GLUE_WORKFLOW" \
-            2>/dev/null && echo "Deleted Glue workflow." \
-            || echo "Glue workflow already gone."
+          try_delete "Glue crawler" \
+            aws glue delete-crawler --name "$GLUE_CRAWLER"
 
-          aws glue delete-database --name "$GLUE_DATABASE" \
-            2>/dev/null && echo "Deleted Glue database." \
-            || echo "Glue database already gone."
+          try_delete "Glue workflow" \
+            aws glue delete-workflow --name "$GLUE_WORKFLOW"
+
+          try_delete "Glue database" \
+            aws glue delete-database --name "$GLUE_DATABASE"
 
 
       # ========================================
@@ -145,31 +170,41 @@ jobs:
 
       - name: Delete IAM roles and policies
         run: |
-          aws iam detach-role-policy \
-            --role-name "$LAMBDA_ROLE" \
-            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY" \
-            2>/dev/null || echo "Lambda policy already detached (or role/policy gone)."
+          try_delete() {
+            local desc="$1"; shift
+            local out
+            if out=$("$@" 2>&1); then
+              echo "Deleted: $desc"
+            elif echo "$out" | grep -qiE "NoSuchEntity|EntityNotFound|ResourceNotFoundException|NotFoundException|does not exist|NoSuchBucket"; then
+              echo "$desc: already gone."
+            else
+              echo "ERROR deleting $desc:"
+              echo "$out"
+              exit 1
+            fi
+          }
 
-          aws iam detach-role-policy \
-            --role-name "$GLUE_ROLE" \
-            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
-            2>/dev/null || echo "Glue policy already detached (or role/policy gone)."
+          try_delete "Lambda role -> Lambda policy attachment" \
+            aws iam detach-role-policy \
+              --role-name "$LAMBDA_ROLE" \
+              --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY"
 
-          aws iam delete-role --role-name "$LAMBDA_ROLE" \
-            2>/dev/null && echo "Deleted Lambda role." \
-            || echo "Lambda role already gone."
+          try_delete "Glue role -> Glue policy attachment" \
+            aws iam detach-role-policy \
+              --role-name "$GLUE_ROLE" \
+              --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY"
 
-          aws iam delete-role --role-name "$GLUE_ROLE" \
-            2>/dev/null && echo "Deleted Glue role." \
-            || echo "Glue role already gone."
+          try_delete "Lambda role" \
+            aws iam delete-role --role-name "$LAMBDA_ROLE"
 
-          aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY" \
-            2>/dev/null && echo "Deleted Lambda policy." \
-            || echo "Lambda policy already gone."
+          try_delete "Glue role" \
+            aws iam delete-role --role-name "$GLUE_ROLE"
 
-          aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
-            2>/dev/null && echo "Deleted Glue policy." \
-            || echo "Glue policy already gone."
+          try_delete "Lambda policy" \
+            aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY"
+
+          try_delete "Glue policy" \
+            aws iam delete-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY"
 
 
       # ========================================
@@ -178,15 +213,34 @@ jobs:
 
       - name: Empty and delete S3 buckets
         run: |
-          aws s3 rm "s3://$INPUT_BUCKET" --recursive 2>/dev/null || true
-          aws s3 rb "s3://$INPUT_BUCKET" \
-            2>/dev/null && echo "Deleted input bucket." \
-            || echo "Input bucket already gone."
+          try_delete() {
+            local desc="$1"; shift
+            local out
+            if out=$("$@" 2>&1); then
+              echo "Deleted: $desc"
+            elif echo "$out" | grep -qiE "NoSuchEntity|EntityNotFound|ResourceNotFoundException|NotFoundException|does not exist|NoSuchBucket"; then
+              echo "$desc: already gone."
+            else
+              echo "ERROR deleting $desc:"
+              echo "$out"
+              exit 1
+            fi
+          }
 
-          aws s3 rm "s3://$OUTPUT_BUCKET" --recursive 2>/dev/null || true
-          aws s3 rb "s3://$OUTPUT_BUCKET" \
-            2>/dev/null && echo "Deleted output bucket." \
-            || echo "Output bucket already gone."
+          # Emptying tolerates the bucket already being gone (NoSuchBucket);
+          # any other failure here (e.g. object lock) still needs to
+          # surface, so it's not blanket-suppressed.
+          try_delete "empty input bucket" \
+            aws s3 rm "s3://$INPUT_BUCKET" --recursive
+
+          try_delete "input bucket" \
+            aws s3 rb "s3://$INPUT_BUCKET"
+
+          try_delete "empty output bucket" \
+            aws s3 rm "s3://$OUTPUT_BUCKET" --recursive
+
+          try_delete "output bucket" \
+            aws s3 rb "s3://$OUTPUT_BUCKET"
 
 
       # ========================================

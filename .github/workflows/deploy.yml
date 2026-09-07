@@ -69,19 +69,24 @@ jobs:
 
       - name: Deploy CloudFormation stack
         run: |
-          # A previous failed attempt can leave the stack stuck in
-          # REVIEW_IN_PROGRESS (a change set that failed to create). Clear
-          # it so this run isn't blocked by it.
+          # A previous failed attempt can leave the stack stuck in a
+          # non-usable state - REVIEW_IN_PROGRESS (change set never
+          # created), ROLLBACK_COMPLETE / ROLLBACK_FAILED (create failed
+          # and rolled back), or CREATE_FAILED. None of these can be
+          # updated directly - only deleted. Clear it so this run isn't
+          # blocked by a previous failure.
           STACK_STATUS=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "MISSING")
 
-          if [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
-            echo "Stack stuck in REVIEW_IN_PROGRESS from a previous failed deploy - deleting it first."
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-            STACK_STATUS="MISSING"
-          fi
+          case "$STACK_STATUS" in
+            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED)
+              echo "Stack stuck in $STACK_STATUS from a previous failed deploy - deleting it first."
+              aws cloudformation delete-stack --stack-name "$STACK_NAME"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+              STACK_STATUS="MISSING"
+              ;;
+          esac
 
           if [ "$STACK_STATUS" = "MISSING" ]; then
             CHANGESET_TYPE="CREATE"
