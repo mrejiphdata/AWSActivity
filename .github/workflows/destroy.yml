@@ -1,0 +1,115 @@
+name: Destroy AWS Activity
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to tear down the github-aws-activity stack'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: ap-southeast-2
+  STACK_NAME: github-aws-activity
+
+  INPUT_BUCKET: github-aws-activity-input
+  OUTPUT_BUCKET: github-aws-activity-output
+
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ========================================
+      # 1. Guard against accidental runs
+      # ========================================
+
+      - name: Verify confirmation input
+        run: |
+          if [ "${{ inputs.confirm }}" != "DESTROY" ]; then
+            echo "Confirmation text did not match 'DESTROY'. Aborting."
+            exit 1
+          fi
+
+          echo "Confirmed. Proceeding with teardown of $STACK_NAME."
+
+
+      # ========================================
+      # 2. Configure AWS credentials
+      # ========================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ========================================
+      # 3. Verify AWS identity
+      # ========================================
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ========================================
+      # 4. Empty S3 buckets
+      # ========================================
+      # CloudFormation cannot delete a non-empty bucket - DeleteStack
+      # would fail on InputBucket/OutputBucket otherwise. `|| true` on
+      # each so a bucket that's already gone (or already empty) doesn't
+      # fail the step.
+
+      - name: Empty input bucket
+        run: |
+          aws s3 rm "s3://$INPUT_BUCKET" --recursive || true
+
+      - name: Empty output bucket
+        run: |
+          aws s3 rm "s3://$OUTPUT_BUCKET" --recursive || true
+
+
+      # ========================================
+      # 5. Delete the CloudFormation stack
+      # ========================================
+
+      - name: Delete CloudFormation stack
+        run: |
+          aws cloudformation delete-stack \
+            --stack-name "$STACK_NAME"
+
+          echo "Delete requested. Waiting for it to finish..."
+
+          aws cloudformation wait stack-delete-complete \
+            --stack-name "$STACK_NAME"
+
+          echo "Stack deleted."
+
+
+      # ========================================
+      # 6. Verify teardown
+      # ========================================
+
+      - name: Verify stack is gone
+        run: |
+          echo ""
+          echo "========================================"
+          echo "TEARDOWN VERIFICATION"
+          echo "========================================"
+
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+            echo "WARNING: stack still exists - check the CloudFormation console for the failure reason."
+            exit 1
+          else
+            echo "Stack $STACK_NAME no longer exists."
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "DESTROY COMPLETE"
+          echo "========================================"
