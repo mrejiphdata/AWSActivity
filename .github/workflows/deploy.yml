@@ -347,6 +347,14 @@ jobs:
       # ========================================
       # 22. Create crawler success trigger if missing
       # ========================================
+      # NOTE: CONDITIONAL (and SCHEDULED) triggers are created in a
+      # CREATED (inactive) state by default - they will NOT fire even
+      # if the condition becomes true, until they're activated. Pass
+      # --start-on-creation so a fresh trigger is armed immediately,
+      # and unconditionally call start-trigger afterward so an
+      # already-existing-but-never-armed trigger also gets activated
+      # (start-trigger on an already-ACTIVATED trigger is a harmless
+      # no-op).
 
       - name: Create crawler success trigger if missing
         run: |
@@ -358,8 +366,16 @@ jobs:
             "{\"Logical\":\"AND\",\"Conditions\":[{\"LogicalOperator\":\"EQUALS\",\"CrawlerName\":\"$GLUE_CRAWLER\",\"CrawlState\":\"SUCCEEDED\"}]}" \
             --actions \
             "[{\"JobName\":\"$GLUE_JOB\"}]" \
-            2>/dev/null && echo "Crawler success trigger created." \
+            --start-on-creation \
+            2>/dev/null && echo "Crawler success trigger created and activated." \
             || echo "Crawler success trigger already exists."
+
+          echo "Ensuring crawler success trigger is activated..."
+
+          aws glue start-trigger \
+            --name github-aws-activity-crawler-success \
+            2>/dev/null && echo "Crawler success trigger is ACTIVATED." \
+            || echo "Trigger activation call returned non-zero (check state manually if the job still doesn't fire)."
 
 
       # ========================================
