@@ -1,11 +1,20 @@
-name: Deploy AWS Activity with CloudFormation
+name: Deploy CSV Pipeline
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "template.yaml"
+      - "scripts/transform.py"
+      - ".github/workflows/deploy.yml"
 
-env:
-  AWS_REGION: ap-southeast-2
-  STACK_NAME: github-aws-activity
+  workflow_dispatch:
+    inputs:
+      notification_email:
+        description: "Email for pipeline failure alerts (optional)"
+        required: false
+        default: ""
 
 jobs:
 
@@ -21,7 +30,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
       # ========================================
       # 2. Configure AWS credentials
       # ========================================
@@ -31,134 +39,177 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-
-      # ========================================
-      # 3. Verify AWS account
-      # ========================================
-
-      - name: Verify AWS identity
-        run: |
-          aws sts get-caller-identity
-
+          aws-region: ${{ secrets.AWS_REGION }}
 
       # ========================================
-      # 4. Validate CloudFormation template
+      # 3. Validate CloudFormation template
       # ========================================
 
       - name: Validate CloudFormation template
         run: |
           aws cloudformation validate-template \
-            --template-body file://cloudformation/template.yaml
+            --template-body file://template.yaml
 
           echo "CloudFormation template is valid."
 
-
       # ========================================
-      # 5. Upload Glue ETL script
+      # 4. Deploy CloudFormation stack
       # ========================================
-      # The input bucket is created by CloudFormation.
-      # We therefore deploy the stack first, then upload
-      # the Glue script.
+      #
+      # CloudFormation now creates/updates:
+      # S3 buckets
+      # IAM roles
+      # Glue database
+      # Glue crawler
+      # Glue job
+      # Glue workflow
+      # Glue triggers
+      # Lambda
+      # S3 -> Lambda permission
+      # S3 -> Lambda notification
+      # Optional SNS/EventBridge alerts
+      #
+      # Sections 22-26 from the old deploy.yml are therefore
+      # no longer required as separate AWS CLI commands.
 
       - name: Deploy CloudFormation stack
         run: |
+          NOTIFICATION_EMAIL="${{ github.event.inputs.notification_email }}"
+
           aws cloudformation deploy \
-            --stack-name "$STACK_NAME" \
-            --template-file cloudformation/template.yaml \
+            --template-file template.yaml \
+            --stack-name csv-pipeline-stack \
             --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset
+            --parameter-overrides \
+              NotificationEmail="$NOTIFICATION_EMAIL"
 
-          echo "CloudFormation stack deployment complete."
+      # ========================================
+      # 5. Get stack outputs
+      # ========================================
 
+      - name: Get CloudFormation outputs
+        run: |
+          INPUT_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name csv-pipeline-stack \
+            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
+            --output text)
+
+          OUTPUT_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name csv-pipeline-stack \
+            --query "Stacks[0].Outputs[?OutputKey=='OutputBucketName'].OutputValue" \
+            --output text)
+
+          SCRIPTS_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name csv-pipeline-stack \
+            --query "Stacks[0].Outputs[?OutputKey=='ScriptsBucketName'].OutputValue" \
+            --output text)
+
+          echo "INPUT_BUCKET=$INPUT_BUCKET" >> "$GITHUB_ENV"
+          echo "OUTPUT_BUCKET=$OUTPUT_BUCKET" >> "$GITHUB_ENV"
+          echo "SCRIPTS_BUCKET=$SCRIPTS_BUCKET" >> "$GITHUB_ENV"
+
+          echo "Input bucket: $INPUT_BUCKET"
+          echo "Output bucket: $OUTPUT_BUCKET"
+          echo "Scripts bucket: $SCRIPTS_BUCKET"
 
       # ========================================
       # 6. Upload Glue ETL script
       # ========================================
+      #
+      # CloudFormation creates the Scripts bucket and Glue job.
+      # This step uploads the actual transform.py file used by
+      # the Glue Python Shell job.
 
       - name: Upload Glue ETL script
         run: |
-          INPUT_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
-            --output text)
-
-          echo "Input bucket: $INPUT_BUCKET"
-
           aws s3 cp \
-            glue/ETLtrialJob.py \
-            "s3://$INPUT_BUCKET/scripts/ETLtrialJob.py"
+            scripts/transform.py \
+            "s3://${SCRIPTS_BUCKET}/scripts/transform.py"
 
-          echo "Glue ETL script uploaded."
-
+          echo "transform.py uploaded successfully."
 
       # ========================================
-      # 7. Verify CloudFormation resources
+      # 7. Verify deployment
       # ========================================
+      #
+      # This replaces section 27 from the old deploy.yml.
 
       - name: Verify deployment
         run: |
 
-          echo "========================================"
-          echo "AWS ACTIVITY DEPLOYMENT"
-          echo "========================================"
-
           echo ""
-          echo "STACK:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].StackStatus" \
-            --output text
+          echo "========================================"
+          echo "DEPLOYMENT VERIFICATION"
+          echo "========================================"
 
           echo ""
           echo "INPUT BUCKET:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
-            --output text
+          aws s3api head-bucket \
+            --bucket "$INPUT_BUCKET"
 
           echo ""
           echo "OUTPUT BUCKET:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='OutputBucketName'].OutputValue" \
-            --output text
+          aws s3api head-bucket \
+            --bucket "$OUTPUT_BUCKET"
+
+          echo ""
+          echo "SCRIPTS BUCKET:"
+          aws s3api head-bucket \
+            --bucket "$SCRIPTS_BUCKET"
 
           echo ""
           echo "GLUE DATABASE:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueDatabaseName'].OutputValue" \
+          aws glue get-database \
+            --name "aws_bootcamp_db_v2" \
+            --query 'Database.Name' \
             --output text
 
           echo ""
           echo "GLUE CRAWLER:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueCrawlerName'].OutputValue" \
+          aws glue get-crawler \
+            --name "bootcamp-crawler-data-v2" \
+            --query 'Crawler.Name' \
             --output text
 
           echo ""
           echo "GLUE JOB:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueJobName'].OutputValue" \
+          aws glue get-job \
+            --job-name "csv-transform-job-v2" \
+            --query 'Job.Name' \
             --output text
 
           echo ""
           echo "GLUE WORKFLOW:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueWorkflowName'].OutputValue" \
+          aws glue get-workflow \
+            --name "csv-ingestion-workflow-v2" \
+            --query 'Workflow.Name' \
+            --output text
+
+          echo ""
+          echo "START TRIGGER:"
+          aws glue get-trigger \
+            --name "start-workflow-trigger-v2" \
+            --query 'Trigger.Name' \
+            --output text
+
+          echo ""
+          echo "CRAWLER SUCCESS TRIGGER:"
+          aws glue get-trigger \
+            --name "crawler-success-trigger-v2" \
+            --query 'Trigger.Name' \
             --output text
 
           echo ""
           echo "LAMBDA:"
-          aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
+          aws lambda get-function \
+            --function-name "start-glue-workflow-on-upload-v2" \
+            --query 'Configuration.FunctionName' \
             --output text
+
+          echo ""
+          echo "S3 -> LAMBDA NOTIFICATION:"
+          aws s3api get-bucket-notification-configuration \
+            --bucket "$INPUT_BUCKET"
 
           echo ""
           echo "========================================"
@@ -166,5 +217,4 @@ jobs:
           echo "========================================"
 
           echo ""
-          echo "No CSV files were uploaded by this deployment."
-          echo "Upload/process one CSV at a time using process.yml."
+          echo "No CSV files were uploaded."

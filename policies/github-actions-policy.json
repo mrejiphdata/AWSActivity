@@ -123,6 +123,20 @@
         "cloudformation:DeleteChangeSet"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "EventBridgeCleanupPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "events:DescribeRule",
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:ListTagsForResource"
+      ],
+      "Resource": "*"
     }
   ]
 }
