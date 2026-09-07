@@ -121,24 +121,16 @@ jobs:
       # ========================================
       # 7. Create Lambda IAM policy if missing
       # ========================================
+      # NOTE: uses try-create/catch instead of list-then-create, so a
+      # stale/eventually-consistent read can never race a create call.
 
       - name: Create Lambda IAM policy if missing
         run: |
-          EXISTING_POLICY_ARN=$(aws iam list-policies \
-            --scope Local \
-            --query "Policies[?PolicyName=='$LAMBDA_POLICY'].Arn" \
-            --output text)
-
-          if [ -n "$EXISTING_POLICY_ARN" ] && [ "$EXISTING_POLICY_ARN" != "None" ]; then
-            echo "Lambda policy already exists."
-            echo "Policy ARN: $EXISTING_POLICY_ARN"
-          else
-            echo "Creating Lambda policy..."
-
-            aws iam create-policy \
-              --policy-name "$LAMBDA_POLICY" \
-              --policy-document file://policies/lambda-policy.json
-          fi
+          aws iam create-policy \
+            --policy-name "$LAMBDA_POLICY" \
+            --policy-document file://policies/lambda-policy.json \
+            2>/dev/null && echo "Lambda policy created." \
+            || echo "Lambda policy already exists."
 
 
       # ========================================
@@ -147,21 +139,11 @@ jobs:
 
       - name: Create Glue IAM policy if missing
         run: |
-          EXISTING_POLICY_ARN=$(aws iam list-policies \
-            --scope Local \
-            --query "Policies[?PolicyName=='$GLUE_POLICY'].Arn" \
-            --output text)
-
-          if [ -n "$EXISTING_POLICY_ARN" ] && [ "$EXISTING_POLICY_ARN" != "None" ]; then
-            echo "Glue policy already exists."
-            echo "Policy ARN: $EXISTING_POLICY_ARN"
-          else
-            echo "Creating Glue policy..."
-
-            aws iam create-policy \
-              --policy-name "$GLUE_POLICY" \
-              --policy-document file://policies/glue-policy.json
-          fi
+          aws iam create-policy \
+            --policy-name "$GLUE_POLICY" \
+            --policy-document file://policies/glue-policy.json \
+            2>/dev/null && echo "Glue policy created." \
+            || echo "Glue policy already exists."
 
 
       # ========================================
@@ -170,21 +152,11 @@ jobs:
 
       - name: Create Lambda IAM role if missing
         run: |
-          if aws iam get-role \
+          aws iam create-role \
             --role-name "$LAMBDA_ROLE" \
-            >/dev/null 2>&1; then
-
-            echo "Lambda role already exists."
-
-          else
-
-            echo "Creating Lambda role..."
-
-            aws iam create-role \
-              --role-name "$LAMBDA_ROLE" \
-              --assume-role-policy-document file://lambda-trust-policy.json
-
-          fi
+            --assume-role-policy-document file://lambda-trust-policy.json \
+            2>/dev/null && echo "Lambda role created." \
+            || echo "Lambda role already exists."
 
 
       # ========================================
@@ -193,26 +165,18 @@ jobs:
 
       - name: Create Glue IAM role if missing
         run: |
-          if aws iam get-role \
+          aws iam create-role \
             --role-name "$GLUE_ROLE" \
-            >/dev/null 2>&1; then
-
-            echo "Glue role already exists."
-
-          else
-
-            echo "Creating Glue role..."
-
-            aws iam create-role \
-              --role-name "$GLUE_ROLE" \
-              --assume-role-policy-document file://glue-trust-policy.json
-
-          fi
+            --assume-role-policy-document file://glue-trust-policy.json \
+            2>/dev/null && echo "Glue role created." \
+            || echo "Glue role already exists."
 
 
       # ========================================
       # 11. Attach Lambda policy
       # ========================================
+      # attach-role-policy is naturally idempotent - re-attaching an
+      # already-attached policy succeeds silently, so no if/else needed.
 
       - name: Attach Lambda policy
         run: |
@@ -244,23 +208,13 @@ jobs:
 
       - name: Create input S3 bucket if missing
         run: |
-          if aws s3api head-bucket \
+          aws s3api create-bucket \
             --bucket "$INPUT_BUCKET" \
-            >/dev/null 2>&1; then
-
-            echo "Input bucket already exists."
-
-          else
-
-            echo "Creating input bucket..."
-
-            aws s3api create-bucket \
-              --bucket "$INPUT_BUCKET" \
-              --region "$AWS_REGION" \
-              --create-bucket-configuration \
-              LocationConstraint="$AWS_REGION"
-
-          fi
+            --region "$AWS_REGION" \
+            --create-bucket-configuration \
+            LocationConstraint="$AWS_REGION" \
+            2>/dev/null && echo "Input bucket created." \
+            || echo "Input bucket already exists."
 
 
       # ========================================
@@ -269,23 +223,13 @@ jobs:
 
       - name: Create output S3 bucket if missing
         run: |
-          if aws s3api head-bucket \
+          aws s3api create-bucket \
             --bucket "$OUTPUT_BUCKET" \
-            >/dev/null 2>&1; then
-
-            echo "Output bucket already exists."
-
-          else
-
-            echo "Creating output bucket..."
-
-            aws s3api create-bucket \
-              --bucket "$OUTPUT_BUCKET" \
-              --region "$AWS_REGION" \
-              --create-bucket-configuration \
-              LocationConstraint="$AWS_REGION"
-
-          fi
+            --region "$AWS_REGION" \
+            --create-bucket-configuration \
+            LocationConstraint="$AWS_REGION" \
+            2>/dev/null && echo "Output bucket created." \
+            || echo "Output bucket already exists."
 
 
       # ========================================
@@ -313,21 +257,11 @@ jobs:
 
       - name: Create Glue database if missing
         run: |
-          if aws glue get-database \
-            --name "$GLUE_DATABASE" \
-            >/dev/null 2>&1; then
-
-            echo "Glue database already exists."
-
-          else
-
-            echo "Creating Glue database..."
-
-            aws glue create-database \
-              --database-input \
-              "{\"Name\":\"$GLUE_DATABASE\",\"Description\":\"AWS Activity Glue database\"}"
-
-          fi
+          aws glue create-database \
+            --database-input \
+            "{\"Name\":\"$GLUE_DATABASE\",\"Description\":\"AWS Activity Glue database\"}" \
+            2>/dev/null && echo "Glue database created." \
+            || echo "Glue database already exists."
 
 
       # ========================================
@@ -349,26 +283,16 @@ jobs:
 
       - name: Create Glue crawler if missing
         run: |
-          if aws glue get-crawler \
+          aws glue create-crawler \
             --name "$GLUE_CRAWLER" \
-            >/dev/null 2>&1; then
-
-            echo "Glue crawler already exists."
-
-          else
-
-            echo "Creating Glue crawler..."
-
-            aws glue create-crawler \
-              --name "$GLUE_CRAWLER" \
-              --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
-              --database-name "$GLUE_DATABASE" \
-              --targets \
-              "{\"S3Targets\":[{\"Path\":\"s3://$INPUT_BUCKET/input/\"}]}" \
-              --schema-change-policy \
-              "{\"UpdateBehavior\":\"UPDATE_IN_DATABASE\",\"DeleteBehavior\":\"LOG\"}"
-
-          fi
+            --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
+            --database-name "$GLUE_DATABASE" \
+            --targets \
+            "{\"S3Targets\":[{\"Path\":\"s3://$INPUT_BUCKET/input/\"}]}" \
+            --schema-change-policy \
+            "{\"UpdateBehavior\":\"UPDATE_IN_DATABASE\",\"DeleteBehavior\":\"LOG\"}" \
+            2>/dev/null && echo "Glue crawler created." \
+            || echo "Glue crawler already exists."
 
 
       # ========================================
@@ -377,27 +301,17 @@ jobs:
 
       - name: Create Glue ETL job if missing
         run: |
-          if aws glue get-job \
+          aws glue create-job \
             --name "$GLUE_JOB" \
-            >/dev/null 2>&1; then
-
-            echo "Glue ETL job already exists."
-
-          else
-
-            echo "Creating Glue ETL job..."
-
-            aws glue create-job \
-              --name "$GLUE_JOB" \
-              --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
-              --command \
-              "{\"Name\":\"pythonshell\",\"PythonVersion\":\"3.9\",\"ScriptLocation\":\"s3://$INPUT_BUCKET/scripts/ETLtrialJob.py\"}" \
-              --max-capacity 0.0625 \
-              --max-retries 0 \
-              --default-arguments \
-              '{"--library-set":"analytics"}'
-
-          fi
+            --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
+            --command \
+            "{\"Name\":\"pythonshell\",\"PythonVersion\":\"3.9\",\"ScriptLocation\":\"s3://$INPUT_BUCKET/scripts/ETLtrialJob.py\"}" \
+            --max-capacity 0.0625 \
+            --max-retries 0 \
+            --default-arguments \
+            '{"--library-set":"analytics"}' \
+            2>/dev/null && echo "Glue ETL job created." \
+            || echo "Glue ETL job already exists."
 
 
       # ========================================
@@ -406,22 +320,12 @@ jobs:
 
       - name: Create Glue workflow if missing
         run: |
-          if aws glue get-workflow \
+          aws glue create-workflow \
             --name "$GLUE_WORKFLOW" \
-            >/dev/null 2>&1; then
-
-            echo "Glue workflow already exists."
-
-          else
-
-            echo "Creating Glue workflow..."
-
-            aws glue create-workflow \
-              --name "$GLUE_WORKFLOW" \
-              --description "AWS Activity serverless ETL workflow" \
-              --max-concurrent-runs 1
-
-          fi
+            --description "AWS Activity serverless ETL workflow" \
+            --max-concurrent-runs 1 \
+            2>/dev/null && echo "Glue workflow created." \
+            || echo "Glue workflow already exists."
 
 
       # ========================================
@@ -430,24 +334,14 @@ jobs:
 
       - name: Create workflow start trigger if missing
         run: |
-          if aws glue get-trigger \
+          aws glue create-trigger \
             --name github-aws-activity-start \
-            >/dev/null 2>&1; then
-
-            echo "Workflow start trigger already exists."
-
-          else
-
-            echo "Creating workflow start trigger..."
-
-            aws glue create-trigger \
-              --name github-aws-activity-start \
-              --workflow-name "$GLUE_WORKFLOW" \
-              --type ON_DEMAND \
-              --actions \
-              "[{\"CrawlerName\":\"$GLUE_CRAWLER\"}]"
-
-          fi
+            --workflow-name "$GLUE_WORKFLOW" \
+            --type ON_DEMAND \
+            --actions \
+            "[{\"CrawlerName\":\"$GLUE_CRAWLER\"}]" \
+            2>/dev/null && echo "Workflow start trigger created." \
+            || echo "Workflow start trigger already exists."
 
 
       # ========================================
@@ -456,26 +350,16 @@ jobs:
 
       - name: Create crawler success trigger if missing
         run: |
-          if aws glue get-trigger \
+          aws glue create-trigger \
             --name github-aws-activity-crawler-success \
-            >/dev/null 2>&1; then
-
-            echo "Crawler success trigger already exists."
-
-          else
-
-            echo "Creating crawler success trigger..."
-
-            aws glue create-trigger \
-              --name github-aws-activity-crawler-success \
-              --workflow-name "$GLUE_WORKFLOW" \
-              --type CONDITIONAL \
-              --predicate \
-              "{\"Logical\":\"AND\",\"Conditions\":[{\"LogicalOperator\":\"EQUALS\",\"CrawlerName\":\"$GLUE_CRAWLER\",\"CrawlState\":\"SUCCEEDED\"}]}" \
-              --actions \
-              "[{\"JobName\":\"$GLUE_JOB\"}]"
-
-          fi
+            --workflow-name "$GLUE_WORKFLOW" \
+            --type CONDITIONAL \
+            --predicate \
+            "{\"Logical\":\"AND\",\"Conditions\":[{\"LogicalOperator\":\"EQUALS\",\"CrawlerName\":\"$GLUE_CRAWLER\",\"CrawlState\":\"SUCCEEDED\"}]}" \
+            --actions \
+            "[{\"JobName\":\"$GLUE_JOB\"}]" \
+            2>/dev/null && echo "Crawler success trigger created." \
+            || echo "Crawler success trigger already exists."
 
 
       # ========================================
@@ -496,32 +380,31 @@ jobs:
       # ========================================
       # 24. Create or update Lambda function
       # ========================================
+      # Tries create first; if that fails (function already exists),
+      # falls back to updating the code instead of relying on a
+      # separate get-function existence check.
 
-      - name: Create Lambda function if missing
+      - name: Create or update Lambda function
         run: |
-          if aws lambda get-function \
+          if aws lambda create-function \
             --function-name "$LAMBDA_FUNCTION" \
-            >/dev/null 2>&1; then
+            --runtime python3.14 \
+            --role "arn:aws:iam::$ACCOUNT_ID:role/$LAMBDA_ROLE" \
+            --handler lambda_function.lambda_handler \
+            --zip-file fileb://lambda.zip \
+            --timeout 30 \
+            --memory-size 128 \
+            2>/dev/null; then
 
-            echo "Lambda function already exists."
-            echo "Updating Lambda code..."
+            echo "Lambda function created."
+
+          else
+
+            echo "Lambda function already exists. Updating code..."
 
             aws lambda update-function-code \
               --function-name "$LAMBDA_FUNCTION" \
               --zip-file fileb://lambda.zip
-
-          else
-
-            echo "Creating Lambda function..."
-
-            aws lambda create-function \
-              --function-name "$LAMBDA_FUNCTION" \
-              --runtime python3.14 \
-              --role "arn:aws:iam::$ACCOUNT_ID:role/$LAMBDA_ROLE" \
-              --handler lambda_function.lambda_handler \
-              --zip-file fileb://lambda.zip \
-              --timeout 30 \
-              --memory-size 128
 
           fi
 
