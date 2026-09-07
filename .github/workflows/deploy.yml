@@ -510,7 +510,7 @@ jobs:
           echo ""
           echo "GLUE JOB:"
           aws glue get-job \
-            --name "$GLUE_JOB" \
+            --job-name "$GLUE_JOB" \
             --query 'Job.Name' \
             --output text
 

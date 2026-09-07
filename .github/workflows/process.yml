@@ -1,0 +1,89 @@
+name: Process One CSV
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_file:
+        description: "CSV file to process"
+        required: true
+        type: choice
+        options:
+          - catalog_run1.csv
+          - catalog_run2.csv
+          - catalog_run3.csv
+
+env:
+  AWS_REGION: ap-southeast-2
+  INPUT_BUCKET: github-aws-activity-input
+
+
+jobs:
+
+  process:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ========================================
+      # 1. Checkout repository
+      # ========================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ========================================
+      # 2. Configure AWS
+      # ========================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ========================================
+      # 3. Verify AWS
+      # ========================================
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ========================================
+      # 4. Upload ONLY selected CSV
+      # ========================================
+
+      - name: Upload selected CSV
+        run: |
+
+          echo "Uploading:"
+          echo "${{ inputs.csv_file }}"
+
+          aws s3 cp \
+            "glue_test_data/${{ inputs.csv_file }}" \
+            "s3://$INPUT_BUCKET/input/${{ inputs.csv_file }}"
+
+
+      # ========================================
+      # 5. Verify upload
+      # ========================================
+
+      - name: Verify uploaded CSV
+        run: |
+
+          aws s3api head-object \
+            --bucket "$INPUT_BUCKET" \
+            --key "input/${{ inputs.csv_file }}"
+
+          echo ""
+          echo "========================================"
+          echo "CSV UPLOADED SUCCESSFULLY"
+          echo "========================================"
+          echo "File: ${{ inputs.csv_file }}"
+          echo "Bucket: $INPUT_BUCKET"
+          echo "Path: input/${{ inputs.csv_file }}"
+          echo "========================================"
