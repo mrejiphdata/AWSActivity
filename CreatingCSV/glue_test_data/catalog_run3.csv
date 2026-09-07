@@ -1,0 +1,11 @@
+id,date,country,population,hazard_type
+21,10/3/08,United States,22000,Landslide
+22,11/17/08,Canada,14500,Flood
+23,12/8/08,India,32000,Landslide
+24,1/22/09,Australia,20000,Flood
+25,2/14/09,Germany,17500,Storm
+26,3/30/09,France,24000,Landslide
+27,4/16/09,Japan,21500,Earthquake
+28,5/25/09,Brazil,29500,Flood
+29,6/11/09,United Kingdom,18000,Storm
+30,7/19/09,Italy,15500,Landslide

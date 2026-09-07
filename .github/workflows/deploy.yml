@@ -1,0 +1,653 @@
+name: Deploy AWS Activity
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-2
+
+  INPUT_BUCKET: github-aws-activity-input
+  OUTPUT_BUCKET: github-aws-activity-output
+
+  GLUE_DATABASE: github_aws_activity_db
+  GLUE_TABLE: input
+  GLUE_CRAWLER: github-aws-activity-crawler
+  GLUE_JOB: github-aws-activity-etl
+  GLUE_WORKFLOW: github-aws-activity-workflow
+
+  LAMBDA_FUNCTION: github-aws-activity-lambda
+
+  LAMBDA_ROLE: github-aws-activity-lambda-role
+  GLUE_ROLE: github-aws-activity-glue-role
+
+  LAMBDA_POLICY: github-aws-activity-lambda-policy
+  GLUE_POLICY: github-aws-activity-glue-policy
+
+
+jobs:
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ========================================
+      # 1. Checkout repository
+      # ========================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ========================================
+      # 2. Configure AWS credentials
+      # ========================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ========================================
+      # 3. Verify AWS account
+      # ========================================
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ========================================
+      # 4. Get AWS account ID
+      # ========================================
+
+      - name: Get AWS account ID
+        id: account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> "$GITHUB_ENV"
+
+          echo "AWS Account: $ACCOUNT_ID"
+
+
+      # ========================================
+      # 5. Create Lambda trust policy file
+      # ========================================
+
+      - name: Create Lambda trust policy
+        run: |
+          cat > lambda-trust-policy.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+
+
+      # ========================================
+      # 6. Create Glue trust policy file
+      # ========================================
+
+      - name: Create Glue trust policy
+        run: |
+          cat > glue-trust-policy.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "glue.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+
+
+      # ========================================
+      # 7. Create Lambda policy if missing
+      # ========================================
+
+      - name: Create Lambda IAM policy if missing
+        run: |
+
+          if aws iam get-policy \
+            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY" \
+            >/dev/null 2>&1
+          then
+            echo "Lambda policy already exists."
+          else
+            echo "Creating Lambda policy..."
+
+            aws iam create-policy \
+              --policy-name "$LAMBDA_POLICY" \
+              --policy-document file://policies/lambda-policy.json
+          fi
+
+
+      # ========================================
+      # 8. Create Glue policy if missing
+      # ========================================
+
+      - name: Create Glue IAM policy if missing
+        run: |
+
+          if aws iam get-policy \
+            --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY" \
+            >/dev/null 2>&1
+          then
+            echo "Glue policy already exists."
+          else
+            echo "Creating Glue policy..."
+
+            aws iam create-policy \
+              --policy-name "$GLUE_POLICY" \
+              --policy-document file://policies/glue-policy.json
+          fi
+
+
+      # ========================================
+      # 9. Create Lambda role if missing
+      # ========================================
+
+      - name: Create Lambda IAM role if missing
+        run: |
+
+          if aws iam get-role \
+            --role-name "$LAMBDA_ROLE" \
+            >/dev/null 2>&1
+          then
+            echo "Lambda role already exists."
+          else
+            echo "Creating Lambda role..."
+
+            aws iam create-role \
+              --role-name "$LAMBDA_ROLE" \
+              --assume-role-policy-document file://lambda-trust-policy.json
+          fi
+
+
+      # ========================================
+      # 10. Create Glue role if missing
+      # ========================================
+
+      - name: Create Glue IAM role if missing
+        run: |
+
+          if aws iam get-role \
+            --role-name "$GLUE_ROLE" \
+            >/dev/null 2>&1
+          then
+            echo "Glue role already exists."
+          else
+            echo "Creating Glue role..."
+
+            aws iam create-role \
+              --role-name "$GLUE_ROLE" \
+              --assume-role-policy-document file://glue-trust-policy.json
+          fi
+
+
+      # ========================================
+      # 11. Attach Lambda policy
+      # ========================================
+
+      - name: Attach Lambda policy
+        run: |
+
+          aws iam attach-role-policy \
+            --role-name "$LAMBDA_ROLE" \
+            --policy-arn \
+            "arn:aws:iam::$ACCOUNT_ID:policy/$LAMBDA_POLICY"
+
+          echo "Lambda policy attached."
+
+
+      # ========================================
+      # 12. Attach Glue policy
+      # ========================================
+
+      - name: Attach Glue policy
+        run: |
+
+          aws iam attach-role-policy \
+            --role-name "$GLUE_ROLE" \
+            --policy-arn \
+            "arn:aws:iam::$ACCOUNT_ID:policy/$GLUE_POLICY"
+
+          echo "Glue policy attached."
+
+
+      # ========================================
+      # 13. Create input bucket if missing
+      # ========================================
+
+      - name: Create input S3 bucket if missing
+        run: |
+
+          if aws s3api head-bucket \
+            --bucket "$INPUT_BUCKET" \
+            >/dev/null 2>&1
+          then
+            echo "Input bucket already exists."
+          else
+            echo "Creating input bucket..."
+
+            aws s3api create-bucket \
+              --bucket "$INPUT_BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration \
+              LocationConstraint="$AWS_REGION"
+          fi
+
+
+      # ========================================
+      # 14. Create output bucket if missing
+      # ========================================
+
+      - name: Create output S3 bucket if missing
+        run: |
+
+          if aws s3api head-bucket \
+            --bucket "$OUTPUT_BUCKET" \
+            >/dev/null 2>&1
+          then
+            echo "Output bucket already exists."
+          else
+            echo "Creating output bucket..."
+
+            aws s3api create-bucket \
+              --bucket "$OUTPUT_BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration \
+              LocationConstraint="$AWS_REGION"
+          fi
+
+
+      # ========================================
+      # 15. Block public access
+      # ========================================
+
+      - name: Configure S3 public access blocking
+        run: |
+
+          aws s3api put-public-access-block \
+            --bucket "$INPUT_BUCKET" \
+            --public-access-block-configuration \
+            BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+          aws s3api put-public-access-block \
+            --bucket "$OUTPUT_BUCKET" \
+            --public-access-block-configuration \
+            BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+          echo "S3 public access blocked."
+
+
+      # ========================================
+      # 16. Create Glue database if missing
+      # ========================================
+
+      - name: Create Glue database if missing
+        run: |
+
+          if aws glue get-database \
+            --name "$GLUE_DATABASE" \
+            >/dev/null 2>&1
+          then
+            echo "Glue database already exists."
+          else
+            echo "Creating Glue database..."
+
+            aws glue create-database \
+              --database-input \
+              "{\"Name\":\"$GLUE_DATABASE\",\"Description\":\"AWS Activity Glue database\"}"
+          fi
+
+
+      # ========================================
+      # 17. Upload Glue ETL script
+      # ========================================
+
+      - name: Upload Glue ETL script
+        run: |
+
+          aws s3 cp \
+            glue/ETLtrialJob.py \
+            "s3://$INPUT_BUCKET/scripts/ETLtrialJob.py"
+
+          echo "Glue ETL script uploaded."
+
+
+      # ========================================
+      # 18. Create Glue crawler if missing
+      # ========================================
+
+      - name: Create Glue crawler if missing
+        run: |
+
+          if aws glue get-crawler \
+            --name "$GLUE_CRAWLER" \
+            >/dev/null 2>&1
+          then
+            echo "Glue crawler already exists."
+          else
+            echo "Creating Glue crawler..."
+
+            aws glue create-crawler \
+              --name "$GLUE_CRAWLER" \
+              --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
+              --database-name "$GLUE_DATABASE" \
+              --targets \
+              "{\"S3Targets\":[{\"Path\":\"s3://$INPUT_BUCKET/input/\"}]}" \
+              --schema-change-policy \
+              "{\"UpdateBehavior\":\"UPDATE_IN_DATABASE\",\"DeleteBehavior\":\"LOG\"}"
+          fi
+
+
+      # ========================================
+      # 19. Create Glue Python Shell job if missing
+      # ========================================
+
+      - name: Create Glue ETL job if missing
+        run: |
+
+          if aws glue get-job \
+            --name "$GLUE_JOB" \
+            >/dev/null 2>&1
+          then
+            echo "Glue ETL job already exists."
+          else
+            echo "Creating Glue ETL job..."
+
+            aws glue create-job \
+              --name "$GLUE_JOB" \
+              --role "arn:aws:iam::$ACCOUNT_ID:role/$GLUE_ROLE" \
+              --command \
+              "{\"Name\":\"pythonshell\",\"PythonVersion\":\"3.9\",\"ScriptLocation\":\"s3://$INPUT_BUCKET/scripts/ETLtrialJob.py\"}" \
+              --max-capacity 0.0625 \
+              --max-retries 0 \
+              --default-arguments \
+              '{"--library-set":"analytics"}'
+          fi
+
+
+      # ========================================
+      # 20. Create Glue workflow if missing
+      # ========================================
+
+      - name: Create Glue workflow if missing
+        run: |
+
+          if aws glue get-workflow \
+            --name "$GLUE_WORKFLOW" \
+            >/dev/null 2>&1
+          then
+            echo "Glue workflow already exists."
+          else
+            echo "Creating Glue workflow..."
+
+            aws glue create-workflow \
+              --name "$GLUE_WORKFLOW" \
+              --description "AWS Activity serverless ETL workflow" \
+              --max-concurrent-runs 1
+          fi
+
+
+      # ========================================
+      # 21. Create ON_DEMAND start trigger if missing
+      # ========================================
+
+      - name: Create workflow start trigger if missing
+        run: |
+
+          if aws glue get-trigger \
+            --name github-aws-activity-start \
+            >/dev/null 2>&1
+          then
+            echo "Workflow start trigger already exists."
+          else
+            echo "Creating workflow start trigger..."
+
+            aws glue create-trigger \
+              --name github-aws-activity-start \
+              --workflow-name "$GLUE_WORKFLOW" \
+              --type ON_DEMAND \
+              --actions \
+              "[{\"CrawlerName\":\"$GLUE_CRAWLER\"}]"
+          fi
+
+
+      # ========================================
+      # 22. Create crawler success trigger
+      # ========================================
+
+      - name: Create crawler success trigger if missing
+        run: |
+
+          if aws glue get-trigger \
+            --name github-aws-activity-crawler-success \
+            >/dev/null 2>&1
+          then
+            echo "Crawler success trigger already exists."
+          else
+            echo "Creating crawler success trigger..."
+
+            aws glue create-trigger \
+              --name github-aws-activity-crawler-success \
+              --workflow-name "$GLUE_WORKFLOW" \
+              --type CONDITIONAL \
+              --predicate \
+              "{\"Logical\":\"AND\",\"Conditions\":[{\"LogicalOperator\":\"EQUALS\",\"CrawlerName\":\"$GLUE_CRAWLER\",\"CrawlState\":\"SUCCEEDED\"}]}" \
+              --actions \
+              "[{\"JobName\":\"$GLUE_JOB\"}]"
+          fi
+
+
+      # ========================================
+      # 23. Package Lambda
+      # ========================================
+
+      - name: Package Lambda
+        run: |
+
+          cd lambda
+
+          zip -q ../lambda.zip lambda_function.py
+
+          cd ..
+
+          echo "Lambda package created."
+
+
+      # ========================================
+      # 24. Create Lambda if missing
+      # ========================================
+
+      - name: Create Lambda function if missing
+        run: |
+
+          if aws lambda get-function \
+            --function-name "$LAMBDA_FUNCTION" \
+            >/dev/null 2>&1
+          then
+            echo "Lambda function already exists."
+
+            echo "Updating Lambda code..."
+
+            aws lambda update-function-code \
+              --function-name "$LAMBDA_FUNCTION" \
+              --zip-file fileb://lambda.zip
+
+          else
+            echo "Creating Lambda function..."
+
+            aws lambda create-function \
+              --function-name "$LAMBDA_FUNCTION" \
+              --runtime python3.14 \
+              --role "arn:aws:iam::$ACCOUNT_ID:role/$LAMBDA_ROLE" \
+              --handler lambda_function.lambda_handler \
+              --zip-file fileb://lambda.zip \
+              --timeout 30 \
+              --memory-size 128
+          fi
+
+
+      # ========================================
+      # 25. Allow S3 to invoke Lambda
+      # ========================================
+
+      - name: Configure Lambda S3 permission
+        run: |
+
+          aws lambda add-permission \
+            --function-name "$LAMBDA_FUNCTION" \
+            --statement-id s3-invoke-permission \
+            --action lambda:InvokeFunction \
+            --principal s3.amazonaws.com \
+            --source-arn "arn:aws:s3:::$INPUT_BUCKET" \
+            --source-account "$ACCOUNT_ID" \
+            2>/dev/null || echo "Lambda S3 permission already exists."
+
+
+      # ========================================
+      # 26. Configure S3 → Lambda notification
+      # ========================================
+
+      - name: Configure S3 Lambda notification
+        run: |
+
+          LAMBDA_ARN=$(aws lambda get-function \
+            --function-name "$LAMBDA_FUNCTION" \
+            --query 'Configuration.FunctionArn' \
+            --output text)
+
+          cat > notification.json <<EOF
+          {
+            "LambdaFunctionConfigurations": [
+              {
+                "Id": "github-aws-activity-csv-trigger",
+                "LambdaFunctionArn": "$LAMBDA_ARN",
+                "Events": [
+                  "s3:ObjectCreated:*"
+                ],
+                "Filter": {
+                  "Key": {
+                    "FilterRules": [
+                      {
+                        "Name": "prefix",
+                        "Value": "input/"
+                      },
+                      {
+                        "Name": "suffix",
+                        "Value": ".csv"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          aws s3api put-bucket-notification-configuration \
+            --bucket "$INPUT_BUCKET" \
+            --notification-configuration file://notification.json
+
+          echo "S3 → Lambda notification configured."
+
+
+      # ========================================
+      # 27. Verify everything
+      # ========================================
+
+      - name: Verify deployment
+        run: |
+
+          echo ""
+          echo "========================================"
+          echo "DEPLOYMENT VERIFICATION"
+          echo "========================================"
+
+          echo ""
+          echo "INPUT BUCKET:"
+          aws s3api head-bucket \
+            --bucket "$INPUT_BUCKET"
+
+          echo ""
+          echo "OUTPUT BUCKET:"
+          aws s3api head-bucket \
+            --bucket "$OUTPUT_BUCKET"
+
+          echo ""
+          echo "GLUE DATABASE:"
+          aws glue get-database \
+            --name "$GLUE_DATABASE" \
+            --query 'Database.Name' \
+            --output text
+
+          echo ""
+          echo "GLUE CRAWLER:"
+          aws glue get-crawler \
+            --name "$GLUE_CRAWLER" \
+            --query 'Crawler.Name' \
+            --output text
+
+          echo ""
+          echo "GLUE JOB:"
+          aws glue get-job \
+            --name "$GLUE_JOB" \
+            --query 'Job.Name' \
+            --output text
+
+          echo ""
+          echo "GLUE WORKFLOW:"
+          aws glue get-workflow \
+            --name "$GLUE_WORKFLOW" \
+            --query 'Workflow.Name' \
+            --output text
+
+          echo ""
+          echo "START TRIGGER:"
+          aws glue get-trigger \
+            --name github-aws-activity-start \
+            --query 'Trigger.Name' \
+            --output text
+
+          echo ""
+          echo "CRAWLER SUCCESS TRIGGER:"
+          aws glue get-trigger \
+            --name github-aws-activity-crawler-success \
+            --query 'Trigger.Name' \
+            --output text
+
+          echo ""
+          echo "LAMBDA:"
+          aws lambda get-function \
+            --function-name "$LAMBDA_FUNCTION" \
+            --query 'Configuration.FunctionName' \
+            --output text
+
+          echo ""
+          echo "========================================"
+          echo "DEPLOYMENT COMPLETE"
+          echo "========================================"
+          echo ""
+          echo "No CSV files were uploaded."
+          echo "Use process.yml to process one CSV at a time."
