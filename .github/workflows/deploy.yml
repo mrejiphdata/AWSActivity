@@ -1,4 +1,4 @@
-name: Deploy CSV Pipeline
+name: Deploy AWS Activity
 
 on:
   push:
@@ -11,11 +11,24 @@ on:
       - ".github/workflows/deploy.yml"
 
   workflow_dispatch:
-    inputs:
-      notification_email:
-        description: "Email for pipeline failure alerts (optional)"
-        required: false
-        default: ""
+
+env:
+  AWS_REGION: ap-southeast-2
+
+  INPUT_BUCKET: github-aws-activity-input
+  OUTPUT_BUCKET: github-aws-activity-output
+
+  GLUE_DATABASE: github_aws_activity_db
+  GLUE_TABLE: input
+  GLUE_CRAWLER: github-aws-activity-crawler
+  GLUE_JOB: github-aws-activity-etl
+  GLUE_WORKFLOW: github-aws-activity-workflow
+
+  LAMBDA_FUNCTION: github-aws-activity-lambda
+
+  LAMBDA_ROLE: github-aws-activity-lambda-role
+  GLUE_ROLE: github-aws-activity-glue-role
+
 
 jobs:
 
@@ -35,25 +48,26 @@ jobs:
       # ========================================
       # 2. Configure AWS credentials
       # ========================================
-      #
-      # IMPORTANT:
-      # Replace ap-south-1 if your AWS resources
-      # are in another region.
-      #
-      # This avoids the previous:
-      # "Input required and not supplied: aws-region"
-      # error.
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ env.AWS_REGION }}
 
 
       # ========================================
-      # 3. Validate CloudFormation template
+      # 3. Verify AWS identity
+      # ========================================
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ========================================
+      # 4. Validate CloudFormation template
       # ========================================
 
       - name: Validate CloudFormation template
@@ -65,122 +79,60 @@ jobs:
 
 
       # ========================================
-      # 4. Deploy CloudFormation stack
+      # 5. Deploy CloudFormation stack
       # ========================================
       #
-      # CloudFormation creates/updates:
+      # CloudFormation now creates:
+      # - Input S3 bucket
+      # - Output S3 bucket
+      # - IAM roles
+      # - Glue database
+      # - Glue crawler
+      # - Glue ETL job
+      # - Glue workflow
+      # - Glue triggers
+      # - Lambda
+      # - S3 -> Lambda permission
+      # - S3 -> Lambda notification
       #
-      # S3 buckets
-      # IAM roles
-      # Glue database
-      # Glue crawler
-      # Glue job
-      # Glue workflow
-      # Glue triggers
-      # Lambda
-      # S3 -> Lambda permission
-      # S3 -> Lambda notification
-      # Optional SNS/EventBridge alerts
-      #
-      # Therefore the old CLI sections 22-26
-      # are no longer separate AWS CLI commands.
+      # Therefore the old CLI resource-creation steps 5-16
+      # and 18-26 are no longer needed.
 
       - name: Deploy CloudFormation stack
         run: |
-          NOTIFICATION_EMAIL="${{ github.event.inputs.notification_email }}"
-
           aws cloudformation deploy \
             --template-file cloudformation/template.yaml \
             --stack-name github-aws-activity-stack \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              NotificationEmail="$NOTIFICATION_EMAIL"
+              InputBucketName="$INPUT_BUCKET" \
+              OutputBucketName="$OUTPUT_BUCKET" \
+              GlueDatabaseName="$GLUE_DATABASE"
 
-
-      # ========================================
-      # 5. Get CloudFormation outputs
-      # ========================================
-
-      - name: Get CloudFormation outputs
-        run: |
-
-          INPUT_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='InputBucketName'].OutputValue" \
-            --output text)
-
-          OUTPUT_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='OutputBucketName'].OutputValue" \
-            --output text)
-
-          SCRIPTS_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='ScriptsBucketName'].OutputValue" \
-            --output text)
-
-          GLUE_DATABASE=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueDatabaseName'].OutputValue" \
-            --output text)
-
-          GLUE_CRAWLER=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueCrawlerName'].OutputValue" \
-            --output text)
-
-          GLUE_JOB=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueJobName'].OutputValue" \
-            --output text)
-
-          GLUE_WORKFLOW=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='GlueWorkflowName'].OutputValue" \
-            --output text)
-
-          LAMBDA_FUNCTION=$(aws cloudformation describe-stacks \
-            --stack-name github-aws-activity-stack \
-            --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
-            --output text)
-
-          echo "INPUT_BUCKET=$INPUT_BUCKET" >> "$GITHUB_ENV"
-          echo "OUTPUT_BUCKET=$OUTPUT_BUCKET" >> "$GITHUB_ENV"
-          echo "SCRIPTS_BUCKET=$SCRIPTS_BUCKET" >> "$GITHUB_ENV"
-          echo "GLUE_DATABASE=$GLUE_DATABASE" >> "$GITHUB_ENV"
-          echo "GLUE_CRAWLER=$GLUE_CRAWLER" >> "$GITHUB_ENV"
-          echo "GLUE_JOB=$GLUE_JOB" >> "$GITHUB_ENV"
-          echo "GLUE_WORKFLOW=$GLUE_WORKFLOW" >> "$GITHUB_ENV"
-          echo "LAMBDA_FUNCTION=$LAMBDA_FUNCTION" >> "$GITHUB_ENV"
-
-          echo "Input bucket: $INPUT_BUCKET"
-          echo "Output bucket: $OUTPUT_BUCKET"
-          echo "Scripts bucket: $SCRIPTS_BUCKET"
-          echo "Glue database: $GLUE_DATABASE"
-          echo "Glue crawler: $GLUE_CRAWLER"
-          echo "Glue job: $GLUE_JOB"
-          echo "Glue workflow: $GLUE_WORKFLOW"
-          echo "Lambda: $LAMBDA_FUNCTION"
+          echo "CloudFormation stack deployed."
 
 
       # ========================================
       # 6. Upload Glue ETL script
       # ========================================
       #
-      # Local:
+      # Your actual file is:
+      #
       # glue/ETLtrialJob.py
       #
-      # S3:
-      # s3://<scripts-bucket>/glue/ETLtrialJob.py
+      # It is uploaded to:
+      #
+      # s3://github-aws-activity-input/scripts/ETLtrialJob.py
+      #
+      # The Glue job in template.yaml uses this location.
 
       - name: Upload Glue ETL script
         run: |
-
           aws s3 cp \
             glue/ETLtrialJob.py \
-            "s3://${SCRIPTS_BUCKET}/glue/ETLtrialJob.py"
+            "s3://$INPUT_BUCKET/scripts/ETLtrialJob.py"
 
-          echo "ETLtrialJob.py uploaded."
+          echo "Glue ETL script uploaded."
 
 
       # ========================================
@@ -206,12 +158,6 @@ jobs:
           echo "OUTPUT BUCKET:"
           aws s3api head-bucket \
             --bucket "$OUTPUT_BUCKET"
-
-
-          echo ""
-          echo "SCRIPTS BUCKET:"
-          aws s3api head-bucket \
-            --bucket "$SCRIPTS_BUCKET"
 
 
           echo ""
@@ -255,26 +201,10 @@ jobs:
 
 
           echo ""
-          echo "START TRIGGER STATE:"
-          aws glue get-trigger \
-            --name github-aws-activity-start \
-            --query 'Trigger.State' \
-            --output text
-
-
-          echo ""
           echo "CRAWLER SUCCESS TRIGGER:"
           aws glue get-trigger \
             --name github-aws-activity-crawler-success \
             --query 'Trigger.Name' \
-            --output text
-
-
-          echo ""
-          echo "CRAWLER SUCCESS TRIGGER STATE:"
-          aws glue get-trigger \
-            --name github-aws-activity-crawler-success \
-            --query 'Trigger.State' \
             --output text
 
 
@@ -287,16 +217,9 @@ jobs:
 
 
           echo ""
-          echo "S3 -> LAMBDA NOTIFICATION:"
+          echo "S3 LAMBDA NOTIFICATION:"
           aws s3api get-bucket-notification-configuration \
             --bucket "$INPUT_BUCKET"
-
-
-          echo ""
-          echo "GLUE SCRIPT:"
-          aws s3api head-object \
-            --bucket "$SCRIPTS_BUCKET" \
-            --key glue/ETLtrialJob.py
 
 
           echo ""
@@ -306,3 +229,5 @@ jobs:
 
           echo ""
           echo "No CSV files were uploaded."
+          echo "Upload CSV files to:"
+          echo "s3://$INPUT_BUCKET/input/"

@@ -1,43 +1,41 @@
-AWSTemplateFormatVersion: "2010-09-09"
+AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  CSV ingestion pipeline:
-  S3 input -> Lambda -> Glue Workflow -> Crawler -> Glue ETL Job -> S3 output
+  AWS Activity serverless CSV ETL pipeline.
+  S3 input -> Lambda -> Glue Workflow -> Crawler -> ETL Job -> S3 output.
+
+# ============================================================
+# Parameters
+# ============================================================
 
 Parameters:
 
   InputBucketName:
     Type: String
-    Default: aws-bootcamp-input-v2
+    Default: github-aws-activity-input
 
   OutputBucketName:
     Type: String
-    Default: aws-bootcamp-output-v2
-
-  ScriptsBucketName:
-    Type: String
-    Default: aws-bootcamp-scripts-v2
+    Default: github-aws-activity-output
 
   GlueDatabaseName:
     Type: String
-    Default: aws_bootcamp_db_v2
+    Default: github_aws_activity_db
 
-  NotificationEmail:
-    Type: String
-    Default: ""
-    Description: Optional email for Glue failure alerts.
+
+# ============================================================
+# Conditions
+# ============================================================
 
 Conditions:
 
-  HasNotificationEmail: !Not
-    - !Equals
-      - !Ref NotificationEmail
-      - ""
+  AlwaysCreate: !Equals ["true", "true"]
+
 
 Resources:
 
-  # ========================================
-  # 1. Input S3 Bucket
-  # ========================================
+  # ==========================================================
+  # 1. Input S3 bucket
+  # ==========================================================
 
   InputBucket:
     Type: AWS::S3::Bucket
@@ -51,9 +49,10 @@ Resources:
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
 
-  # ========================================
-  # 2. Output S3 Bucket
-  # ========================================
+
+  # ==========================================================
+  # 2. Output S3 bucket
+  # ==========================================================
 
   OutputBucket:
     Type: AWS::S3::Bucket
@@ -67,32 +66,17 @@ Resources:
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
 
-  # ========================================
-  # 3. Scripts S3 Bucket
-  # ========================================
 
-  ScriptsBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      BucketName: !Ref ScriptsBucketName
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        IgnorePublicAcls: true
-        BlockPublicPolicy: true
-        RestrictPublicBuckets: true
+  # ==========================================================
+  # 3. Lambda IAM role
+  # ==========================================================
 
-  # ========================================
-  # 4. Lambda execution role
-  # ========================================
-
-  LambdaGlueTriggerRole:
+  LambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: LambdaGlueTriggerRole-CFN
+      RoleName: github-aws-activity-lambda-role
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -105,26 +89,35 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
       Policies:
-        - PolicyName: StartGlueWorkflowPolicy
+        - PolicyName: github-aws-activity-lambda-policy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
+
               - Effect: Allow
                 Action:
                   - glue:StartWorkflowRun
                   - glue:GetWorkflowRun
-                Resource: "*"
+                Resource: !Sub
+                  - arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:workflow/${WorkflowName}
+                  - WorkflowName: !Ref GlueWorkflow
 
-  # ========================================
-  # 5. Glue service role
-  # ========================================
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${InputBucket.Arn}/input/*'
 
-  GlueServiceRole:
+
+  # ==========================================================
+  # 4. Glue IAM role
+  # ==========================================================
+
+  GlueRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: GlueETLRole-CFN
+      RoleName: github-aws-activity-glue-role
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -137,27 +130,35 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
 
       Policies:
-        - PolicyName: S3AccessForGlue
+        - PolicyName: github-aws-activity-glue-policy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
+
               - Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
                   - s3:ListBucket
                 Resource:
                   - !GetAtt InputBucket.Arn
-                  - !Sub "${InputBucket.Arn}/input/*"
                   - !GetAtt OutputBucket.Arn
-                  - !Sub "${OutputBucket.Arn}/*"
-                  - !GetAtt ScriptsBucket.Arn
-                  - !Sub "${ScriptsBucket.Arn}/glue/*"
 
-  # ========================================
-  # 6. Glue Database
-  # ========================================
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub '${InputBucket.Arn}/input/*'
+                  - !Sub '${InputBucket.Arn}/scripts/*'
+
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub '${OutputBucket.Arn}/*'
+
+
+  # ==========================================================
+  # 5. Glue database
+  # ==========================================================
 
   GlueDatabase:
     Type: AWS::Glue::Database
@@ -165,99 +166,117 @@ Resources:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
         Name: !Ref GlueDatabaseName
-        Description: Database for the CSV ingestion pipeline.
+        Description: AWS Activity Glue database
 
-  # ========================================
-  # 7. Glue Crawler
-  # ========================================
+
+  # ==========================================================
+  # 6. Glue crawler
+  # ==========================================================
 
   GlueCrawler:
     Type: AWS::Glue::Crawler
     Properties:
       Name: github-aws-activity-crawler
-      Role: !GetAtt GlueServiceRole.Arn
-      DatabaseName: !Ref GlueDatabaseName
+      Role: !GetAtt GlueRole.Arn
+      DatabaseName: !Ref GlueDatabase
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${InputBucketName}/input/"
+          - Path: !Sub 's3://${InputBucketName}/input/'
 
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: LOG
 
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_EVERYTHING
 
-  # ========================================
-  # 8. Glue ETL Job
-  # ========================================
+  # ==========================================================
+  # 7. Glue Python Shell ETL job
+  # ==========================================================
   #
-  # GitHub Actions uploads:
+  # deploy.yml uploads:
   # glue/ETLtrialJob.py
   # to:
-  # s3://<ScriptsBucket>/glue/ETLtrialJob.py
+  # s3://github-aws-activity-input/scripts/ETLtrialJob.py
   #
+  # The job is created by CloudFormation and the script is
+  # uploaded by GitHub Actions.
 
   GlueETLJob:
     Type: AWS::Glue::Job
     Properties:
-      Name: github-aws-activity-etl-job
-      Role: !GetAtt GlueServiceRole.Arn
+      Name: github-aws-activity-etl
+      Role: !GetAtt GlueRole.Arn
 
       Command:
         Name: pythonshell
-        PythonVersion: "3.9"
-        ScriptLocation: !Sub "s3://${ScriptsBucketName}/glue/ETLtrialJob.py"
+        PythonVersion: '3.9'
+        ScriptLocation: !Sub 's3://${InputBucketName}/scripts/ETLtrialJob.py'
 
       DefaultArguments:
-        "--INPUT_BUCKET": !Ref InputBucketName
-        "--OUTPUT_BUCKET": !Ref OutputBucketName
+        '--library-set': analytics
+        '--INPUT_BUCKET': !Ref InputBucketName
+        '--OUTPUT_BUCKET': !Ref OutputBucketName
 
       MaxCapacity: 0.0625
-      GlueVersion: "3.0"
+      MaxRetries: 0
+      GlueVersion: '3.0'
       Timeout: 30
 
-  # ========================================
-  # 9. Glue Workflow
-  # ========================================
+
+  # ==========================================================
+  # 8. Glue workflow
+  # ==========================================================
 
   GlueWorkflow:
     Type: AWS::Glue::Workflow
     Properties:
       Name: github-aws-activity-workflow
-      Description: Orchestrates crawler -> ETL job for CSV ingestion.
+      Description: AWS Activity serverless ETL workflow
+      MaxConcurrentRuns: 1
 
-  # ========================================
-  # 10. Start Workflow Trigger
-  # ========================================
 
-  StartWorkflowTrigger:
+  # ==========================================================
+  # 9. Workflow start trigger
+  # ==========================================================
+  #
+  # Lambda starts the workflow.
+  # This ON_DEMAND trigger then starts the crawler.
+
+  WorkflowStartTrigger:
     Type: AWS::Glue::Trigger
+    DependsOn:
+      - GlueWorkflow
+      - GlueCrawler
     Properties:
       Name: github-aws-activity-start
       Type: ON_DEMAND
       WorkflowName: !Ref GlueWorkflow
-
       Actions:
         - CrawlerName: !Ref GlueCrawler
-
       StartOnCreation: false
 
-  # ========================================
-  # 11. Crawler Success Trigger
-  # ========================================
+
+  # ==========================================================
+  # 10. Crawler success trigger
+  # ==========================================================
+  #
+  # This replaces old deploy.yml step 22.
+  # StartOnCreation: true means the trigger is active after
+  # CloudFormation creates it. No aws glue start-trigger is
+  # needed.
 
   CrawlerSuccessTrigger:
     Type: AWS::Glue::Trigger
+    DependsOn:
+      - WorkflowStartTrigger
+      - GlueETLJob
     Properties:
       Name: github-aws-activity-crawler-success
       Type: CONDITIONAL
       WorkflowName: !Ref GlueWorkflow
-
       StartOnCreation: true
 
       Predicate:
-        Logical: ANY
+        Logical: AND
         Conditions:
           - LogicalOperator: EQUALS
             CrawlerName: !Ref GlueCrawler
@@ -266,25 +285,25 @@ Resources:
       Actions:
         - JobName: !Ref GlueETLJob
 
-  # ========================================
-  # 12. Lambda Function
-  # ========================================
-  #
-  # CloudFormation owns the Lambda function.
-  # The Lambda code below is equivalent to the
-  # S3 -> Glue Workflow trigger logic.
-  #
-  # The local lambda/lambda_function.py is kept in
-  # the repository, but is not packaged because this
-  # CloudFormation template embeds the Lambda code.
 
-  StartGlueWorkflowFunction:
+  # ==========================================================
+  # 11. Lambda function
+  # ==========================================================
+  #
+  # CloudFormation embeds the small S3 -> Glue workflow
+  # launcher. Therefore lambda.zip is NOT required.
+  #
+  # The repository can still keep:
+  # lambda/lambda_function.py
+  # as the source/reference implementation.
+
+  LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: github-aws-activity-start-glue-workflow
+      FunctionName: github-aws-activity-lambda
       Runtime: python3.12
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaGlueTriggerRole.Arn
+      Role: !GetAtt LambdaRole.Arn
       Timeout: 30
       MemorySize: 128
 
@@ -320,30 +339,33 @@ Resources:
                   "statusCode": 200
               }
 
-  # ========================================
-  # 13. Allow S3 to invoke Lambda
-  # ========================================
+
+  # ==========================================================
+  # 12. Allow S3 to invoke Lambda
+  # ==========================================================
+  #
+  # This replaces old deploy.yml step 25.
 
   LambdaInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref StartGlueWorkflowFunction
+      FunctionName: !Ref LambdaFunction
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
-      SourceArn: !Sub "arn:aws:s3:::${InputBucketName}"
+      SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${InputBucketName}'
       SourceAccount: !Ref AWS::AccountId
 
-  # ========================================
-  # 14. Custom Resource Lambda for
-  #     S3 -> Lambda notification
-  # ========================================
 
-  BucketNotificationConfigRole:
+  # ==========================================================
+  # 13. IAM role for S3 notification custom resource
+  # ==========================================================
+
+  BucketNotificationRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: BucketNotificationConfigRole-CFN
+      RoleName: github-aws-activity-s3-notification-role
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -356,9 +378,9 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
       Policies:
-        - PolicyName: ConfigureS3Notification
+        - PolicyName: github-aws-activity-s3-notification-policy
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
@@ -366,13 +388,29 @@ Resources:
                   - s3:PutBucketNotification
                 Resource: !GetAtt InputBucket.Arn
 
-  BucketNotificationConfigFunction:
+
+  # ==========================================================
+  # 14. Lambda for S3 notification custom resource
+  # ==========================================================
+  #
+  # This avoids the S3 -> Lambda circular dependency:
+  #
+  # S3 bucket
+  #    |
+  #    +--> Lambda permission
+  #    |
+  #    +--> notification
+  #
+  # CloudFormation waits until the Lambda permission exists
+  # before configuring the notification.
+
+  BucketNotificationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: configure-input-bucket-notification-v2
+      FunctionName: github-aws-activity-s3-notification
       Runtime: python3.12
       Handler: index.handler
-      Role: !GetAtt BucketNotificationConfigRole.Arn
+      Role: !GetAtt BucketNotificationRole.Arn
       Timeout: 60
 
       Code:
@@ -383,20 +421,14 @@ Resources:
 
           s3 = boto3.client("s3")
 
-          def send_response(
-              event,
-              context,
-              status,
-              data,
-              physical_resource_id
-          ):
+          def send_response(event, context, status, data, physical_id):
               body = json.dumps({
                   "Status": status,
                   "Reason": (
-                      f"See CloudWatch Log Stream: "
-                      f"{context.log_stream_name}"
+                      "See CloudWatch Log Stream: "
+                      + context.log_stream_name
                   ),
-                  "PhysicalResourceId": physical_resource_id,
+                  "PhysicalResourceId": physical_id,
                   "StackId": event["StackId"],
                   "RequestId": event["RequestId"],
                   "LogicalResourceId": event["LogicalResourceId"],
@@ -404,7 +436,7 @@ Resources:
               }).encode("utf-8")
 
               request = urllib.request.Request(
-                  url=event["ResponseURL"],
+                  event["ResponseURL"],
                   data=body,
                   method="PUT",
                   headers={
@@ -417,13 +449,10 @@ Resources:
 
           def handler(event, context):
               props = event["ResourceProperties"]
-
               bucket = props["BucketName"]
               lambda_arn = props["LambdaArn"]
 
-              physical_resource_id = (
-                  f"s3-notification-{bucket}"
-              )
+              physical_id = "s3-notification-" + bucket
 
               try:
                   if event["RequestType"] in ("Create", "Update"):
@@ -467,127 +496,40 @@ Resources:
                       context,
                       "SUCCESS",
                       {},
-                      physical_resource_id
+                      physical_id
                   )
 
               except Exception as error:
-                  print(error)
+                  print(str(error))
 
                   send_response(
                       event,
                       context,
                       "FAILED",
                       {"Error": str(error)},
-                      physical_resource_id
+                      physical_id
                   )
 
-  # ========================================
-  # 15. Configure S3 Lambda notification
-  # ========================================
 
-  ConfigureInputBucketNotification:
+  # ==========================================================
+  # 15. Configure S3 -> Lambda notification
+  # ==========================================================
+
+  ConfigureBucketNotification:
     Type: Custom::S3LambdaNotification
     DependsOn:
       - LambdaInvokePermission
-      - BucketNotificationConfigFunction
-
+      - BucketNotificationFunction
     Properties:
-      ServiceToken: !GetAtt BucketNotificationConfigFunction.Arn
+      ServiceToken: !GetAtt BucketNotificationFunction.Arn
       BucketName: !Ref InputBucket
-      LambdaArn: !GetAtt StartGlueWorkflowFunction.Arn
-      ConfigVersion: "1"
+      LambdaArn: !GetAtt LambdaFunction.Arn
+      ConfigVersion: '1'
 
-  # ========================================
-  # 16. SNS Alerts
-  # ========================================
 
-  AlertsTopic:
-    Type: AWS::SNS::Topic
-    Condition: HasNotificationEmail
-    Properties:
-      TopicName: github-aws-activity-alerts
-
-  AlertsSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: HasNotificationEmail
-    Properties:
-      Protocol: email
-      TopicArn: !Ref AlertsTopic
-      Endpoint: !Ref NotificationEmail
-
-  # ========================================
-  # 17. EventBridge Rule - Glue Job Failure
-  # ========================================
-
-  GlueJobFailureRule:
-    Type: AWS::Events::Rule
-    Condition: HasNotificationEmail
-    Properties:
-      Name: github-aws-activity-glue-job-failure
-      EventPattern:
-        source:
-          - aws.glue
-        detail-type:
-          - Glue Job State Change
-        detail:
-          jobName:
-            - !Ref GlueETLJob
-          state:
-            - FAILED
-
-      Targets:
-        - Arn: !Ref AlertsTopic
-          Id: GlueJobFailureTarget
-
-  # ========================================
-  # 18. EventBridge Rule - Glue Crawler Failure
-  # ========================================
-
-  GlueCrawlerFailureRule:
-    Type: AWS::Events::Rule
-    Condition: HasNotificationEmail
-    Properties:
-      Name: github-aws-activity-crawler-failure
-      EventPattern:
-        source:
-          - aws.glue
-        detail-type:
-          - Glue Crawler State Change
-        detail:
-          crawlerName:
-            - !Ref GlueCrawler
-          state:
-            - FAILED
-
-      Targets:
-        - Arn: !Ref AlertsTopic
-          Id: GlueCrawlerFailureTarget
-
-  # ========================================
-  # 19. SNS Topic Policy
-  # ========================================
-
-  AlertsTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
-    Condition: HasNotificationEmail
-    Properties:
-      Topics:
-        - !Ref AlertsTopic
-
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowEventBridgePublish
-            Effect: Allow
-            Principal:
-              Service: events.amazonaws.com
-            Action:
-              - sns:Publish
-            Resource: !Ref AlertsTopic
-
-# ========================================
+# ============================================================
 # Outputs
-# ========================================
+# ============================================================
 
 Outputs:
 
@@ -599,13 +541,9 @@ Outputs:
     Description: Output S3 bucket
     Value: !Ref OutputBucket
 
-  ScriptsBucketName:
-    Description: Bucket containing ETLtrialJob.py
-    Value: !Ref ScriptsBucket
-
   GlueDatabaseName:
     Description: Glue database
-    Value: !Ref GlueDatabaseName
+    Value: !Ref GlueDatabase
 
   GlueCrawlerName:
     Description: Glue crawler
@@ -621,8 +559,8 @@ Outputs:
 
   LambdaFunctionName:
     Description: Lambda function triggered by S3
-    Value: !Ref StartGlueWorkflowFunction
+    Value: !Ref LambdaFunction
 
   LambdaFunctionArn:
     Description: Lambda function ARN
-    Value: !GetAtt StartGlueWorkflowFunction.Arn
+    Value: !GetAtt LambdaFunction.Arn
