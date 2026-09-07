@@ -58,14 +58,92 @@ jobs:
       # job / workflow / triggers. CAPABILITY_NAMED_IAM is required
       # because the template creates IAM roles and policies with
       # explicit names.
+      #
+      # NOTE: this uses the low-level create-change-set / execute-change-set
+      # calls instead of `aws cloudformation deploy`. That convenience
+      # wrapper has a known bug where it crashes with a bare
+      # "aws: [ERROR]: 'Status'" instead of a real error message while
+      # polling change-set status - even when the change set itself
+      # succeeded. The explicit waiters below don't share that bug, and
+      # print the real failure reason from describe-stack-events instead.
 
       - name: Deploy CloudFormation stack
         run: |
-          aws cloudformation deploy \
+          # A previous failed attempt can leave the stack stuck in
+          # REVIEW_IN_PROGRESS (a change set that failed to create). Clear
+          # it so this run isn't blocked by it.
+          STACK_STATUS=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --template-file cloudformation/template.yaml \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "MISSING")
+
+          if [ "$STACK_STATUS" = "REVIEW_IN_PROGRESS" ]; then
+            echo "Stack stuck in REVIEW_IN_PROGRESS from a previous failed deploy - deleting it first."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+            STACK_STATUS="MISSING"
+          fi
+
+          if [ "$STACK_STATUS" = "MISSING" ]; then
+            CHANGESET_TYPE="CREATE"
+          else
+            CHANGESET_TYPE="UPDATE"
+          fi
+
+          CHANGESET_NAME="deploy-$(date +%s)"
+
+          echo "Creating $CHANGESET_TYPE change set: $CHANGESET_NAME"
+
+          aws cloudformation create-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGESET_NAME" \
+            --change-set-type "$CHANGESET_TYPE" \
+            --template-body file://cloudformation/template.yaml \
+            --capabilities CAPABILITY_NAMED_IAM
+
+          echo "Waiting for change set to finish creating..."
+
+          if ! aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGESET_NAME"; then
+
+            REASON=$(aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGESET_NAME" \
+              --query 'StatusReason' --output text)
+
+            if [[ "$REASON" == *"didn't contain changes"* ]]; then
+              echo "No changes to deploy - nothing to do."
+              aws cloudformation delete-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$CHANGESET_NAME"
+              exit 0
+            fi
+
+            echo "Change set failed to create: $REASON"
+            exit 1
+          fi
+
+          echo "Executing change set..."
+
+          aws cloudformation execute-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGESET_NAME"
+
+          echo "Waiting for stack $CHANGESET_TYPE to complete..."
+
+          WAITER="stack-create-complete"
+          if [ "$CHANGESET_TYPE" = "UPDATE" ]; then
+            WAITER="stack-update-complete"
+          fi
+
+          if ! aws cloudformation wait "$WAITER" --stack-name "$STACK_NAME"; then
+            echo "Stack $CHANGESET_TYPE did not complete successfully. Failure events:"
+            aws cloudformation describe-stack-events \
+              --stack-name "$STACK_NAME" \
+              --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[LogicalResourceId,ResourceStatusReason]" \
+              --output table
+            exit 1
+          fi
 
           echo "Stack deploy complete."
 
