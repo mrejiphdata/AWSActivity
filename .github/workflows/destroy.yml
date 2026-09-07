@@ -10,7 +10,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-2
-  STACK_NAME: github-aws-activity
+  STACK_NAME: github-aws-activity-stack
 
   INPUT_BUCKET: github-aws-activity-input
   OUTPUT_BUCKET: github-aws-activity-output
@@ -80,6 +80,11 @@ jobs:
 
       - name: Delete CloudFormation stack
         run: |
+          if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+            echo "Stack $STACK_NAME not found - nothing to delete."
+            exit 0
+          fi
+
           aws cloudformation delete-stack \
             --stack-name "$STACK_NAME"
 
@@ -92,7 +97,23 @@ jobs:
 
 
       # ========================================
-      # 6. Verify teardown
+      # 6. Delete Lambda CloudWatch log groups
+      # ========================================
+      # CloudFormation doesn't own these - Lambda creates them on first
+      # invocation, so they're never part of the stack and survive
+      # delete-stack. Removed here so destroy actually leaves nothing behind.
+
+      - name: Delete Lambda log groups
+        run: |
+          aws logs delete-log-group \
+            --log-group-name "/aws/lambda/github-aws-activity-lambda" || true
+
+          aws logs delete-log-group \
+            --log-group-name "/aws/lambda/github-aws-activity-s3-notification" || true
+
+
+      # ========================================
+      # 7. Verify teardown
       # ========================================
 
       - name: Verify stack is gone
