@@ -11,6 +11,16 @@ Parameters:
     Type: String
     Default: github-aws-activity-output
 
+  LambdaCodeS3Key:
+    Type: String
+    Description: >
+      S3 key (inside InputBucketName) of the zipped lambda/lambda_function.py
+      deployment package. deploy.yml uploads a new key (content-hashed) each
+      time the file changes, so this always points at the exact code that's
+      deployed - no more inline-vs-file drift.
+    Default: lambda/lambda_function.zip
+
+
 Resources:
 
   # ============================================================
@@ -39,10 +49,54 @@ Resources:
 
 
   # ============================================================
-  # LAMBDA ROLE
+  # S3-NOTIFICATION HELPER LAMBDA ROLE
   # ============================================================
+  # Only wires up the bucket notification - no S3 object access, no Glue
+  # access.
 
-  LambdaRole:
+  S3NotificationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-aws-activity-s3-notification-role
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+        - PolicyName: github-aws-activity-s3-notification-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketNotification
+                  - s3:PutBucketNotification
+                Resource:
+                  - !GetAtt InputBucket.Arn
+
+
+  # ============================================================
+  # PROCESSING LAMBDA ROLE
+  # ============================================================
+  # Only starts the Glue workflow - no S3 access and no bucket-notification
+  # rights, since it never touches either.
+
+  ProcessingLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: github-aws-activity-lambda-role
@@ -63,7 +117,6 @@ Resources:
             Version: '2012-10-17'
             Statement:
 
-              # CloudWatch Logs
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -71,27 +124,6 @@ Resources:
                   - logs:PutLogEvents
                 Resource: '*'
 
-              # S3 access
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt InputBucket.Arn
-                  - !Sub '${InputBucket.Arn}/*'
-                  - !GetAtt OutputBucket.Arn
-                  - !Sub '${OutputBucket.Arn}/*'
-
-              # S3 notification configuration
-              - Effect: Allow
-                Action:
-                  - s3:GetBucketNotification
-                  - s3:PutBucketNotification
-                Resource:
-                  - !GetAtt InputBucket.Arn
-
-              # Glue Workflow access
               - Effect: Allow
                 Action:
                   - glue:StartWorkflowRun
@@ -139,7 +171,8 @@ Resources:
                   - !GetAtt OutputBucket.Arn
                   - !Sub '${OutputBucket.Arn}/*'
 
-              # Glue access
+              # Glue access - scoped to this project's own catalog database,
+              # table, crawler, job and workflow instead of Resource: '*'
               - Effect: Allow
                 Action:
                   - glue:GetDatabase
@@ -148,12 +181,30 @@ Resources:
                   - glue:UpdateTable
                   - glue:GetPartitions
                   - glue:BatchCreatePartition
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/github_aws_activity_db'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/github_aws_activity_db/*'
+
+              - Effect: Allow
+                Action:
                   - glue:StartCrawler
                   - glue:GetCrawler
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/github-aws-activity-crawler'
+
+              - Effect: Allow
+                Action:
                   - glue:GetJob
                   - glue:StartJobRun
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/github-aws-activity-etl'
+
+              - Effect: Allow
+                Action:
                   - glue:GetWorkflowRunProperties
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/github-aws-activity-workflow'
 
               # CloudWatch Logs
               - Effect: Allow
@@ -225,8 +276,13 @@ Resources:
       MaxCapacity: 0.0625
       MaxRetries: 0
 
+      # Output bucket / catalog database / table are passed in here instead
+      # of being hard-coded inside ETLtrialJob.py.
       DefaultArguments:
         '--library-set': analytics
+        '--OUTPUT_BUCKET': !Ref OutputBucketName
+        '--DATABASE_NAME': !Ref GlueDatabase
+        '--TABLE_NAME': 'input'
 
 
   # ============================================================
@@ -237,7 +293,12 @@ Resources:
     Type: AWS::Glue::Workflow
     Properties:
       Name: github-aws-activity-workflow
-      MaxConcurrentRuns: 1
+      # Raised from 1 so two CSVs landing close together don't cause the
+      # second upload's workflow run to be rejected outright. The crawler
+      # itself can still only run one crawl at a time (an AWS-side limit,
+      # not configurable here) - see lambda_function.py's retry logic for
+      # the rest of the fix.
+      MaxConcurrentRuns: 5
 
 
   # ============================================================
@@ -292,12 +353,14 @@ Resources:
 
   S3NotificationFunction:
     Type: AWS::Lambda::Function
+    DependsOn:
+      - S3NotificationRole
     Properties:
       FunctionName: github-aws-activity-s3-notification
       Runtime: python3.12
       Handler: index.handler
       Timeout: 60
-      Role: !GetAtt LambdaRole.Arn
+      Role: !GetAtt S3NotificationRole.Arn
 
       Code:
         ZipFile: |
@@ -388,68 +451,26 @@ Resources:
   # ============================================================
   # ACTUAL PROCESSING LAMBDA
   # ============================================================
+  # Deployed from the zipped lambda/lambda_function.py (uploaded to S3 by
+  # deploy.yml) instead of an inline ZipFile, so the file in the repo is the
+  # only copy of the code - nothing to drift out of sync.
 
   LambdaFunction:
     Type: AWS::Lambda::Function
     DependsOn:
-      - LambdaRole
+      - ProcessingLambdaRole
 
     Properties:
       FunctionName: github-aws-activity-lambda
       Runtime: python3.14
-      Handler: index.lambda_handler
-      Timeout: 30
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
       MemorySize: 128
-      Role: !GetAtt LambdaRole.Arn
+      Role: !GetAtt ProcessingLambdaRole.Arn
 
       Code:
-        ZipFile: |
-          import json
-          import boto3
-          import urllib.parse
-
-          glue_client = boto3.client("glue")
-
-          WORKFLOW_NAME = "github-aws-activity-workflow"
-
-          def lambda_handler(event, context):
-
-              record = event["Records"][0]
-
-              bucket = record["s3"]["bucket"]["name"]
-
-              key = urllib.parse.unquote_plus(
-                  record["s3"]["object"]["key"]
-              )
-
-              print("Bucket:", bucket)
-              print("File:", key)
-
-              if not key.lower().endswith(".csv"):
-                  return {
-                      "statusCode": 200,
-                      "body": json.dumps("Not a CSV file")
-                  }
-
-              response = glue_client.start_workflow_run(
-                  Name=WORKFLOW_NAME,
-                  RunProperties={
-                      "SOURCE_BUCKET": bucket,
-                      "SOURCE_KEY": key
-                  }
-              )
-
-              print("Workflow started:", response["RunId"])
-
-              return {
-                  "statusCode": 200,
-                  "body": json.dumps({
-                      "message": "Glue Workflow started",
-                      "workflow_run_id": response["RunId"],
-                      "source_bucket": bucket,
-                      "source_key": key
-                  })
-              }
+        S3Bucket: !Ref InputBucketName
+        S3Key: !Ref LambdaCodeS3Key
 
 
   # ============================================================

@@ -1,14 +1,25 @@
+import os
 import sys
 import boto3
 import pandas as pd
 from awsglue.utils import getResolvedOptions
 
 # -----------------------------------
-# 1. Get file information from workflow run properties
+# 1. Get file information from workflow run properties + job arguments
 # -----------------------------------
+# OUTPUT_BUCKET / DATABASE_NAME / TABLE_NAME come from the Glue job's
+# DefaultArguments in cloudformation/template.yaml instead of being
+# hard-coded here, so the template stays the single source of truth for
+# resource names.
 args = getResolvedOptions(
     sys.argv,
-    ["WORKFLOW_NAME", "WORKFLOW_RUN_ID"]
+    [
+        "WORKFLOW_NAME",
+        "WORKFLOW_RUN_ID",
+        "OUTPUT_BUCKET",
+        "DATABASE_NAME",
+        "TABLE_NAME",
+    ]
 )
 
 glue_client = boto3.client("glue")
@@ -28,10 +39,9 @@ print("Source key:", source_key)
 # 2. Glue Data Catalog configuration
 # -----------------------------------
 
-DATABASE_NAME = "github_aws_activity_db"
-TABLE_NAME = "input"
-
-glue_client = boto3.client("glue")
+OUTPUT_BUCKET = args["OUTPUT_BUCKET"]
+DATABASE_NAME = args["DATABASE_NAME"]
+TABLE_NAME = args["TABLE_NAME"]
 
 
 # -----------------------------------
@@ -84,6 +94,28 @@ print(df.dtypes)
 
 
 # -----------------------------------
+# 5b. Use the catalog schema: flag columns the crawler has on record for
+# this table that are missing from this particular file. This is a real
+# check now, not just a print - it catches a file that dropped a column the
+# catalog still expects (e.g. a schema regression after catalog_run3.csv
+# added hazard_type).
+# -----------------------------------
+
+catalog_column_names = {column["Name"] for column in catalog_columns}
+input_column_names = set(df.columns)
+
+missing_from_input = catalog_column_names - input_column_names
+
+if missing_from_input:
+    print(
+        "WARNING: catalog has columns this file does not: "
+        f"{sorted(missing_from_input)}"
+    )
+else:
+    print("Input file has every column the catalog expects.")
+
+
+# -----------------------------------
 # 6. Convert date from string to datetime
 # -----------------------------------
 
@@ -106,8 +138,12 @@ print(df.head())
 # -----------------------------------
 # 8. Write transformed data as Parquet
 # -----------------------------------
+# Named after the source file instead of a fixed output.parquet, so each
+# run's result lands in its own object and later runs stop overwriting
+# earlier ones.
 
-output_path = "s3://github-aws-activity-output/output/output.parquet"
+source_filename = os.path.splitext(os.path.basename(source_key))[0]
+output_path = f"s3://{OUTPUT_BUCKET}/output/{source_filename}.parquet"
 
 df.to_parquet(
     output_path,

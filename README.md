@@ -46,8 +46,11 @@ watches for the crawler to reach `CrawlState: SUCCEEDED`, then starts
 **6. The job transforms only the new file.** Rather than processing every file in the bucket,
 the job calls `get_workflow_run_properties()` to retrieve the `SOURCE_BUCKET`/`SOURCE_KEY` the
 Lambda set in step 3, reads exactly that object with pandas, parses the `date` column, derives a
-`year` column, and writes the result as Parquet to
-`s3://github-aws-activity-output/output/output.parquet`.
+`year` column, and writes the result as Parquet named after the source file (for example
+`s3://github-aws-activity-output/output/catalog_run1.parquet`), so each run keeps its own output
+instead of overwriting the last one. The output bucket, catalog database and table names are
+passed into the job as arguments from `cloudformation/template.yaml` rather than hard-coded in
+`ETLtrialJob.py`.
 
 Each of these five hand-offs is an independent AWS service reacting to a state change in the
 previous one — S3 notification → Lambda invocation → Glue workflow run → crawler completion →
@@ -63,10 +66,10 @@ is the only source of truth for every resource above. Nothing in this pipeline i
 hand or by ad-hoc CLI calls anymore — it's all provisioned, updated, and torn down as one unit:
 
 - **S3 buckets** — `InputBucket` and `OutputBucket`, both with public access fully blocked.
-- **IAM roles** — `LambdaRole` (used by both Lambda functions) and `GlueRole` (used by the
-  crawler and job), each with an inline policy scoped to just the actions and resources they
-  need (S3 read/write on the two buckets, Glue Data Catalog and workflow actions, CloudWatch
-  Logs).
+- **IAM roles** — each Lambda has its own role (`S3NotificationRole` for the notification-wiring
+  helper, `ProcessingLambdaRole` for the one that starts the workflow) instead of sharing one, and
+  `GlueRole` for the crawler and job. Every role's inline policy is scoped to just the specific
+  buckets, Glue resources (by name, not `*`), and log groups it needs.
 - **Glue Data Catalog** — the database, the crawler, and the Python Shell job.
 - **Glue Workflow and triggers** — the workflow itself, the `ON_DEMAND` `StartTrigger`, and the
   `CONDITIONAL` `CrawlerSuccessTrigger`.
@@ -95,14 +98,19 @@ terminal:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `deploy.yml` | Push to `main` touching the template, Lambda, or Glue script; or manual | Validates and deploys the CloudFormation stack, uploads `glue/ETLtrialJob.py` to the input bucket's `scripts/` prefix, then verifies every resource exists. |
+| `deploy.yml` | Push to `main` touching the template, Lambda, or Glue script; or manual | Zips and uploads `lambda/lambda_function.py` (content-hashed S3 key), validates and deploys the CloudFormation stack, uploads `glue/ETLtrialJob.py` to the input bucket's `scripts/` prefix, then verifies every resource exists. |
 | `process.yml` | Manual, pick one of the three sample CSVs | Uploads a single CSV to `input/`, which is the real end-to-end trigger for the whole pipeline described above. |
 | `destroy.yml` | Manual, requires typing `DESTROY` | Empties both S3 buckets, deletes the CloudFormation stack, waits for deletion to finish, cleans up the two Lambda log groups CloudFormation doesn't own, and confirms the stack is gone. |
-| `cleanup-legacy.yml` | Manual, requires typing `CLEANUP` | One-time workflow for resources left over from the pre-CloudFormation phase (see below) or a stack stuck in `ROLLBACK_COMPLETE`. |
 
-`deploy.yml` is the only one that runs automatically; the other three are deliberately manual
+`deploy.yml` is the only one that runs automatically; the other two are deliberately manual
 (`workflow_dispatch`) since uploading test data or tearing down infrastructure shouldn't happen
 on every push.
+
+All three workflows authenticate to AWS using the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+repository secrets. (OIDC federation - so no long-lived keys are stored in GitHub at all - was
+evaluated, but this AWS account has an Organization-level SCP that denies
+`iam:CreateOpenIDConnectProvider`/`iam:ListOpenIDConnectProviders`, so it can't be enabled without
+an org admin lifting that restriction first.)
 
 ## How this project got here
 
@@ -115,35 +123,23 @@ The pipeline went through three distinct phases, visible in the repo's git histo
    into an imperative `deploy.yml` that ran `aws` CLI commands directly — creating trust
    policies, IAM roles and managed policies, the buckets, the Glue database/crawler/job/workflow
    and the Lambda, one `aws iam create-role` / `aws glue create-crawler` / etc. call at a time.
-   The JSON files still sitting in `policies/` (`lambda-policy.json`, `glue-policy.json`,
-   `github-actions-policy.json`) are artifacts of that phase — they document what the CLI-created
-   IAM policies looked like, but nothing in the current pipeline reads them anymore.
 
 3. **CloudFormation.** The imperative CLI steps were replaced with the single declarative
    template now in `cloudformation/template.yaml`, and `deploy.yml` shrank to essentially one
-   command: `aws cloudformation deploy`. This is what makes the current `destroy.yml` possible —
+   command: `aws cloudformation deploy`. This is what makes `destroy.yml` possible —
    CloudFormation tracks every resource it created as one stack, so tearing it down is one
    `delete-stack` call instead of manually reversing a dozen CLI commands in the right order.
-   `cleanup-legacy.yml` exists specifically to remove the resources phase 2 created outside of
-   CloudFormation's management, so they don't collide with the stack trying to create resources
-   of the same name.
 
 ## Repository layout
 
 ```
 cloudformation/template.yaml    CloudFormation stack — every AWS resource described above
-lambda/lambda_function.py       Reference copy of the processing Lambda's code
-                                 (the deployed code is inlined in the template — see note below)
+lambda/lambda_function.py       The processing Lambda's code — zipped and uploaded to S3 by
+                                 deploy.yml, and the only copy of it (nothing inlined anymore)
 glue/ETLtrialJob.py             The Glue Python Shell ETL job
 CreatingCSV/                    CSVCreation.py generates the 3 sample CSVs used by process.yml
-policies/                       Leftover IAM policy JSON from the pre-CloudFormation phase (unused)
-.github/workflows/              deploy.yml, process.yml, destroy.yml, cleanup-legacy.yml
+.github/workflows/              deploy.yml, process.yml, destroy.yml
 ```
-
-**Note:** both Lambda functions are deployed via inline `ZipFile` code directly in
-`template.yaml`, not by zipping and uploading `lambda/lambda_function.py`. That file is kept in
-the repo as a readable reference, but editing it alone has no effect on what's deployed — changes
-need to be mirrored into the template's inline code.
 
 ## Running it
 

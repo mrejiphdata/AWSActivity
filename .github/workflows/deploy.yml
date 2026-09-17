@@ -79,7 +79,38 @@ jobs:
 
 
       # ========================================
-      # 5. Deploy CloudFormation stack
+      # 5. Package and upload the Lambda code
+      # ========================================
+      #
+      # lambda/lambda_function.py is the only copy of this code - the
+      # template no longer inlines it. Naming the zip after a hash of the
+      # file's contents (rather than a fixed key) means the S3 key changes
+      # whenever the code changes, which is what makes CloudFormation
+      # actually pick up the new code on the next deploy.
+
+      - name: Package Lambda code
+        run: |
+          cd lambda
+          zip -j lambda_function.zip lambda_function.py
+          cd ..
+
+          HASH=$(sha256sum lambda/lambda_function.zip | cut -c1-12)
+          KEY="lambda/lambda_function-$HASH.zip"
+
+          echo "LAMBDA_CODE_S3_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "Packaged Lambda as $KEY"
+
+      - name: Upload Lambda code
+        run: |
+          aws s3 cp \
+            lambda/lambda_function.zip \
+            "s3://$INPUT_BUCKET/$LAMBDA_CODE_S3_KEY"
+
+          echo "Lambda code uploaded to s3://$INPUT_BUCKET/$LAMBDA_CODE_S3_KEY"
+
+
+      # ========================================
+      # 6. Deploy CloudFormation stack
       # ========================================
       #
       # CloudFormation now creates:
@@ -97,6 +128,12 @@ jobs:
       #
       # Therefore the old CLI resource-creation steps 5-16
       # and 18-26 are no longer needed.
+      #
+      # Note: on a genuinely first-ever deploy (input bucket doesn't exist
+      # yet), the "Upload Lambda code" step above would fail since the
+      # bucket this stack is about to create doesn't exist until this step
+      # runs. That's a one-time bootstrap wrinkle only - not an issue for
+      # this project, since the bucket already exists.
 
       - name: Deploy CloudFormation stack
         run: |
@@ -107,13 +144,13 @@ jobs:
             --parameter-overrides \
               InputBucketName="$INPUT_BUCKET" \
               OutputBucketName="$OUTPUT_BUCKET" \
-              GlueDatabaseName="$GLUE_DATABASE"
+              LambdaCodeS3Key="$LAMBDA_CODE_S3_KEY"
 
           echo "CloudFormation stack deployed."
 
 
       # ========================================
-      # 6. Upload Glue ETL script
+      # 7. Upload Glue ETL script
       # ========================================
       #
       # Your actual file is:
@@ -136,7 +173,7 @@ jobs:
 
 
       # ========================================
-      # 7. Verify deployment
+      # 8. Verify deployment
       # ========================================
 
       - name: Verify deployment
