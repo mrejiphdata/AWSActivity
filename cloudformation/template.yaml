@@ -11,14 +11,25 @@ Parameters:
     Type: String
     Default: github-aws-activity-output
 
+  LambdaArtifactsBucketName:
+    Type: String
+    Description: >
+      A separate S3 bucket - outside this stack, created once and never torn
+      down - that holds the zipped Lambda deployment package. It has to live
+      outside the stack: InputBucket is created BY this stack, so if the
+      Lambda's code also lived there, a from-scratch deploy would need the
+      code uploaded before the bucket that holds it exists. deploy.yml
+      creates this bucket if it's missing (idempotent) before every upload.
+    Default: github-aws-activity-lambda-artifacts
+
   LambdaCodeS3Key:
     Type: String
     Description: >
-      S3 key (inside InputBucketName) of the zipped lambda/lambda_function.py
-      deployment package. deploy.yml uploads a new key (content-hashed) each
-      time the file changes, so this always points at the exact code that's
-      deployed - no more inline-vs-file drift.
-    Default: lambda/lambda_function.zip
+      S3 key (inside LambdaArtifactsBucketName) of the zipped
+      lambda/lambda_function.py deployment package. deploy.yml uploads a new
+      key (content-hashed) each time the file changes, so this always points
+      at the exact code that's deployed - no more inline-vs-file drift.
+    Default: lambda_function.zip
 
 
 Resources:
@@ -469,7 +480,7 @@ Resources:
       Role: !GetAtt ProcessingLambdaRole.Arn
 
       Code:
-        S3Bucket: !Ref InputBucketName
+        S3Bucket: !Ref LambdaArtifactsBucketName
         S3Key: !Ref LambdaCodeS3Key
 
 

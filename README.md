@@ -78,6 +78,14 @@ hand or by ad-hoc CLI calls anymore — it's all provisioned, updated, and torn 
 - **The S3 → Lambda wiring** — an `AWS::Lambda::Permission` plus a custom resource,
   `ConfigureBucketNotification`.
 
+One bucket deliberately isn't part of the stack: `github-aws-activity-lambda-artifacts` holds the
+zipped `lambda/lambda_function.py` that the processing Lambda's `Code` property points at.
+`InputBucket` is created *by* this stack, so if the Lambda code lived there too, a from-scratch
+deploy (e.g. right after `destroy.yml`) would need the zip uploaded before the bucket that's
+supposed to hold it exists yet. The artifacts bucket is created once, outside the stack
+(`deploy.yml` creates it if missing, idempotently, on every run), and is never touched by
+`destroy.yml` — it just persists across every destroy/deploy cycle.
+
 ### Why there's a second, "invisible" Lambda
 
 CloudFormation has no native `AWS::S3::BucketNotification` resource, and setting a

@@ -17,6 +17,7 @@ env:
 
   INPUT_BUCKET: github-aws-activity-input
   OUTPUT_BUCKET: github-aws-activity-output
+  LAMBDA_ARTIFACTS_BUCKET: github-aws-activity-lambda-artifacts
 
   GLUE_DATABASE: github_aws_activity_db
   GLUE_TABLE: input
@@ -87,6 +88,30 @@ jobs:
       # file's contents (rather than a fixed key) means the S3 key changes
       # whenever the code changes, which is what makes CloudFormation
       # actually pick up the new code on the next deploy.
+      #
+      # This goes to LAMBDA_ARTIFACTS_BUCKET, not INPUT_BUCKET. InputBucket
+      # is created BY the CloudFormation stack below, so right after a
+      # destroy.yml run it doesn't exist yet - uploading here first would
+      # fail with NoSuchBucket. The artifacts bucket lives outside the
+      # stack's lifecycle specifically so this step always has somewhere to
+      # land, whether the stack currently exists or not.
+
+      - name: Ensure Lambda artifacts bucket exists
+        run: |
+          if aws s3api head-bucket --bucket "$LAMBDA_ARTIFACTS_BUCKET" 2>/dev/null; then
+            echo "Artifacts bucket already exists."
+          else
+            echo "Creating artifacts bucket..."
+            aws s3api create-bucket \
+              --bucket "$LAMBDA_ARTIFACTS_BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration LocationConstraint="$AWS_REGION"
+
+            aws s3api put-public-access-block \
+              --bucket "$LAMBDA_ARTIFACTS_BUCKET" \
+              --public-access-block-configuration \
+                BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          fi
 
       - name: Package Lambda code
         run: |
@@ -95,7 +120,7 @@ jobs:
           cd ..
 
           HASH=$(sha256sum lambda/lambda_function.zip | cut -c1-12)
-          KEY="lambda/lambda_function-$HASH.zip"
+          KEY="lambda_function-$HASH.zip"
 
           echo "LAMBDA_CODE_S3_KEY=$KEY" >> "$GITHUB_ENV"
           echo "Packaged Lambda as $KEY"
@@ -104,9 +129,9 @@ jobs:
         run: |
           aws s3 cp \
             lambda/lambda_function.zip \
-            "s3://$INPUT_BUCKET/$LAMBDA_CODE_S3_KEY"
+            "s3://$LAMBDA_ARTIFACTS_BUCKET/$LAMBDA_CODE_S3_KEY"
 
-          echo "Lambda code uploaded to s3://$INPUT_BUCKET/$LAMBDA_CODE_S3_KEY"
+          echo "Lambda code uploaded to s3://$LAMBDA_ARTIFACTS_BUCKET/$LAMBDA_CODE_S3_KEY"
 
 
       # ========================================
@@ -128,12 +153,6 @@ jobs:
       #
       # Therefore the old CLI resource-creation steps 5-16
       # and 18-26 are no longer needed.
-      #
-      # Note: on a genuinely first-ever deploy (input bucket doesn't exist
-      # yet), the "Upload Lambda code" step above would fail since the
-      # bucket this stack is about to create doesn't exist until this step
-      # runs. That's a one-time bootstrap wrinkle only - not an issue for
-      # this project, since the bucket already exists.
 
       - name: Deploy CloudFormation stack
         run: |
@@ -144,6 +163,7 @@ jobs:
             --parameter-overrides \
               InputBucketName="$INPUT_BUCKET" \
               OutputBucketName="$OUTPUT_BUCKET" \
+              LambdaArtifactsBucketName="$LAMBDA_ARTIFACTS_BUCKET" \
               LambdaCodeS3Key="$LAMBDA_CODE_S3_KEY"
 
           echo "CloudFormation stack deployed."
