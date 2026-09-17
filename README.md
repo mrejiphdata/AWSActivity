@@ -138,6 +138,28 @@ The pipeline went through three distinct phases, visible in the repo's git histo
    CloudFormation tracks every resource it created as one stack, so tearing it down is one
    `delete-stack` call instead of manually reversing a dozen CLI commands in the right order.
 
+## Feedback addressed
+
+A review of an earlier version of this project raised eight points. Here's what changed in
+response to each:
+
+| # | Feedback | What changed |
+|---|---|---|
+| 1 | Every run overwrote `output/output.parquet`, so only the last run's result survived. | `ETLtrialJob.py` now names the output after the source file (e.g. `output/catalog_run1.parquet`), so each run keeps its own file. |
+| 2 | The workflow only allowed 1 concurrent run, so two CSVs uploaded together could cause the second to be skipped. | `GlueWorkflow.MaxConcurrentRuns` raised to 5, and `lambda_function.py` retries `start_workflow_run` up to 3 times (with backoff) on `ConcurrentRunsExceededException` before giving up. |
+| 3 | AWS access keys were stored as GitHub secrets. | Attempted OIDC federation (a `GithubActionsDeployRole` trusted via GitHub's OIDC provider, no long-lived keys needed). Blocked: this AWS account has an Organization-level SCP that denies `iam:CreateOpenIDConnectProvider`/`ListOpenIDConnectProviders`, so the provider can't be created without an org admin lifting that restriction. Reverted to the original `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets for now. |
+| 4 | Both Lambdas shared one over-permissioned role; the Glue role allowed its actions on all resources (`*`). | Split into `S3NotificationRole` (bucket-notification wiring only) and `ProcessingLambdaRole` (starts the workflow only, no S3 access). `GlueRole`'s Glue actions are now scoped to this project's specific database/table/crawler/job/workflow ARNs instead of `*`. |
+| 5 | Output bucket, database, and table names were typed directly into `ETLtrialJob.py`. | Passed in as Glue job arguments (`--OUTPUT_BUCKET`, `--DATABASE_NAME`, `--TABLE_NAME`) from `cloudformation/template.yaml`, read via `getResolvedOptions`. Nothing hard-coded in the script anymore. |
+| 6 | The job read the table schema from the Glue Catalog but only printed it. | Now compares catalog columns against the incoming file's columns and logs a warning if the file is missing a column the catalog expects — a real schema-drift check instead of a print statement. |
+| 7 | Lambda code lived in two places (inline in the template and in `lambda/lambda_function.py`), risking drift. | `deploy.yml` zips and uploads `lambda/lambda_function.py` to S3; the template's `LambdaFunction` references that S3 object instead of an inline `ZipFile`. One copy of the code. |
+| 8 | Unused `policies/` folder, one-time `cleanup-legacy.yml`, and an unused `GlueDatabaseName` override in `deploy.yml`. | All three removed. Screenshot renaming was intentionally left for later. |
+
+One additional fix came out of rolling this out: deploying the Lambda from S3 introduced a
+bootstrap ordering problem (uploading the code to `InputBucket` before the same stack has created
+that bucket, e.g. right after a `destroy.yml` run). Fixed by giving the Lambda code its own
+bucket, `github-aws-activity-lambda-artifacts`, created once and left outside the stack entirely
+so it survives every destroy/deploy cycle — see "What the CloudFormation stack owns" above.
+
 ## Repository layout
 
 ```
@@ -161,49 +183,51 @@ CreatingCSV/                    CSVCreation.py generates the 3 sample CSVs used 
   access is needed for any of this.
 
 # first run:
-![alt text](<Screenshot 2026-09-07 225458.png>)
-![alt text](<Screenshot 2026-09-07 222425.png>)
-![alt text](<Screenshot 2026-09-07 222819.png>)
+![alt text](<CSVProcessPipeline.png>)
+![alt text](<lambdaFunc.png>)
+![alt text](<lambdaFuncOverview.png>)
 # output in paraquet format:
-![alt text](<Screenshot 2026-09-07 230511.png>)
+![alt text](<OutputFile.png>)
 
 # github actions:
-![alt text](<Screenshot 2026-09-07 231415.png>)
+![alt text](<GithubActions.png>)
 
 # pipelines:
-![alt text](<Screenshot 2026-09-07 231439.png>)
+![alt text](<DeployPipeline.png>)
 
-![alt text](<Screenshot 2026-09-07 231455.png>)
+![alt text](<ProcessPipeline.png>)
 
 # on running destroy pipeline:
-![alt text](<Screenshot 2026-09-07 232140.png>)
+![alt text](<DestroyPipeline.png>)
 
-![alt text](<Screenshot 2026-09-07 232338.png>)
+![alt text](<AfterDestroy.png>)
 
 # after that running the deploy pipeline again:
-![alt text](<Screenshot 2026-09-07 232553.png>)
+![alt text](<DeployPipeline_AfterDestroy.png>)
 
 ## running the pipeline to uplad csv-first csv file with 4 columns
-![alt text](<Screenshot 2026-09-07 232624.png>)
+![alt text](<CSV1.png>)
 
 # buckets created
-![alt text](<Screenshot 2026-09-07 232837.png>)
+![alt text](<Buckets.png>)
 
 # input bucket
-![alt text](<Screenshot 2026-09-07 233215.png>)
+![alt text](<InputBucket.png>)
 
 # crawler loading to catalog
-![alt text](<Screenshot 2026-09-07 233105.png>)
+![alt text](<CrawlerTable.png>)
 
-# output bucket:
-![alt text](<Screenshot 2026-09-07 232929.png>)
+
 
 ## running the pipeline to uplad csv-third csv file with 5 columns
 
 # input bucket:
-![alt text](<Screenshot 2026-09-07 233558.png>)
+![alt text](<inputBucketSecondCSV.png>)
 
 # same catalog gets updated 
-![alt text](<Screenshot 2026-09-07 233641.png>)
+![alt text](<CatalogUpdation.png>)
 
-![alt text](<Screenshot 2026-09-07 230632.png>)
+![alt text](<OutputSecondCSV.png>)
+
+# updated output bucket name
+![alt text](image.png)
